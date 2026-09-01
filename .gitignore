@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# logs & runtime
+*.log
+npm-debug.log*
+.DS_Store
+
+# benchmarks / local artifacts
+benchmarks/
+results/
+
+# editor
+.vscode/
+.idea/
