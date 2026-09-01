@@ -55,7 +55,6 @@ HELMSMAN_CWL_BUDGET=30000 dsh web
 
 | 工具 | 用途 |
 |------|------|
-| `cwl_mark` | (可选)手动标注 episode,获得更细粒度的控制 |
 | `cwl_recall` | 列出被驱逐 episode 涉及的文件路径,按需重新读取 |
 
 观测端点:

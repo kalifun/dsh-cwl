@@ -16,7 +16,7 @@
 // 配置（环境变量）：
 //   HELMSMAN_CWL_BUDGET  — 覆盖预算（tokens）；默认 = 上下文窗口 80%
 //
-// 工具：cwl_mark（主动标注 episode，可选）、cwl_recall（找回被驱逐段涉及的文件）
+// 工具：cwl_recall（找回被驱逐段涉及的文件）
 // HTTP：/api/cwl/evictions（驱逐记录）、/api/cwl/force（调试：强制驱逐一次）
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -112,23 +112,8 @@ export function apply(ctx) {
     return next()
   })
 
-  // 工具：cwl_mark（主动标注，可选增强）、cwl_recall（恢复被驱逐文件）
+  // 工具：cwl_recall（恢复被驱逐文件）
   try {
-    ctx.tools.register(defineTool({
-      name: 'cwl_mark',
-      description: '标注当前工作段（结构化上下文驱逐用）。start 开段，end 收段。type=expl 探索 / act 动作。',
-      parameters: {
-        action: { type: 'string', required: true, enum: ['start', 'end'] },
-        name: { type: 'string', description: '段名（start 时必填）' },
-        type: { type: 'string', enum: ['expl', 'act'], description: '段类型' },
-        dependencies: { type: 'array', items: { type: 'string' }, description: 'act 依赖的 expl' },
-        description: { type: 'string', description: '收 expl 段的一句话总结' },
-      },
-      output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-      async execute(args) {
-        return JSON.stringify({ ok: true, marked: args })
-      },
-    }))
     ctx.tools.register(defineTool({
       name: 'cwl_recall',
       description: '找回被驱逐的工作段涉及的文件路径（驱逐后按需重读）。',

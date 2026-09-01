@@ -18,3 +18,4 @@ results/
 *.tgz
 
 .direnv/
+docs/

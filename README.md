@@ -67,7 +67,6 @@ Agent-facing tools:
 
 | Tool | Purpose |
 |------|---------|
-| `cwl_mark` | (optional) manually annotate episodes for finer-grained control |
 | `cwl_recall` | list file paths touched by evicted episodes, to re-read on demand |
 
 Observability:
