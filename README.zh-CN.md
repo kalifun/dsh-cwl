@@ -31,7 +31,8 @@ CWL 把对话记录当作**结构化的工作记录**,做确定性驱逐:智能�
 ## 安装
 
 ```bash
-dsh plugin --profile <name> add github:kalifun/dsh-cwl
+dsh plugin --profile <name> add dsh-cwl                 # 从 npm 安装
+dsh plugin --profile <name> add github:kalifun/dsh-cwl  # 或从 GitHub 安装
 ```
 
 或者把目录放进你的 composition:

@@ -41,7 +41,8 @@ episodes whose effects are already persisted. **User messages are never evicted.
 ## Install
 
 ```bash
-dsh plugin --profile <name> add github:kalifun/dsh-cwl
+dsh plugin --profile <name> add dsh-cwl                 # from npm
+dsh plugin --profile <name> add github:kalifun/dsh-cwl  # or from GitHub
 ```
 
 Or vendor the directory and add to your composition:
