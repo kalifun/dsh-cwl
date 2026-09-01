@@ -16,3 +16,5 @@ results/
 
 # npm pack artifacts
 *.tgz
+
+.direnv/
