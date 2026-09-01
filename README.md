@@ -5,6 +5,8 @@ structured context eviction for long-horizon agents.
 
 > Paradigm: [*Beyond Compaction: Structured Context Eviction for Long-Horizon Agents*](https://arxiv.org/abs/2606.11213) (arXiv:2606.11213, Kiz8)
 
+**English** | [简体中文](./README.zh-CN.md)
+
 ## Why not summarization compaction?
 
 Compaction (the standard response to context pressure) summarizes history with an LLM.
