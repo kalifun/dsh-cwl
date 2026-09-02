@@ -20,7 +20,7 @@ CWL 把对话记录当作**结构化的工作记录**,做确定性驱逐:智能�
 
 ## 工作原理
 
-1. **Episode 推导(自动,无需智能体标注)**:连续的同类工具批次合并为语义段(`expl` 表示读/搜索类,`act` 表示 bash/edit/write 类);某个 `act` 触碰的文件如果之前被某个 `expl` 读过,则建立依赖边。
+1. **Episode 推导(自动,无需智能体标注)**:连续的同类工具批次合并为语义段(`expl` 表示读/搜索类,`act` 表示 bash/edit/write 类);每条用户消息关闭当前段(轮次边界),保证每段有界;某个 `act` 触碰的文件如果之前被某个 `expl` 读过,则建立依赖边。
 2. **压力计量**:真实上下文压力 = input + cacheRead + output + reasoning tokens(从 `assistant/message` usage 事件累计——`tokenMeter.measure().totalTokens` 不含 cacheRead,而 cacheRead 在长会话中占大头)。
 3. **分级驱逐**(挂在 `agent/pre-step` 瀑布上,每次 LLM 调用前):
    - 先驱逐未被依赖的 `expl` 段(保留一行"已探索: …"标记)

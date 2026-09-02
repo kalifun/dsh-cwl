@@ -49,6 +49,13 @@ export function deriveEpisodes(events) {
   for (const ev of events) {
     const type = ev?.type
     const data = ev.data ?? {}
+    if (type === 'user/message') {
+      // 用户消息是天然的工作段边界：关掉当前 episode，避免跨轮同类型工具
+      // 批次无限合并成永不完成的巨型段（其 endSeq 随每个 tool/result 增长，
+      // 永远 > newestAllowed 导致零驱逐）。修复后每个用户回合 = 独立 episode。
+      flush()
+      continue
+    }
     if (type === 'assistant/message') {
       const content = data.message?.content ?? []
       const toolCalls = content.filter((b) => b?.type === 'tool-call')
@@ -111,8 +118,12 @@ export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
   const surfaceSet = new Set(surface)
   const depended = new Set()
   for (const ep of episodes) if (ep.type === 'act') for (const d of ep.deps ?? []) depended.add(d)
-  const tailFloor = tailWindow > 0 && surface.length > tailWindow
-    ? surface[surface.length - 1 - tailWindow]
+  // surface 在 replace 后不再按 seq 有序（marker 的新 seq 被 splice 进中间），
+  // 边界/tailFloor 一律按排序后的节点取（位置取值会落到任意低 seq 节点上，
+  // 把候选全部过滤掉 → 零驱逐）。
+  const sorted = [...surface].sort((a, b) => a - b)
+  const tailFloor = tailWindow > 0 && sorted.length > tailWindow
+    ? sorted[sorted.length - 1 - tailWindow]
     : -1
   let best = null
   for (const ep of episodes) {

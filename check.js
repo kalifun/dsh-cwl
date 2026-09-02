@@ -81,4 +81,21 @@ assert.equal(mr.length, 2, '100-106 adjacent merged, 108 separate (gap at 107)')
 assert.deepEqual(mr[0], { start: 100, end: 106, labels: ['expl-1', 'act-1'] }, 'merged range covers 100-106 with both labels')
 assert.deepEqual(mr[1], { start: 108, end: 108, labels: ['expl-2'] }, 'non-adjacent range stays separate')
 
-console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges')
+// --- 用户消息关段：跨轮同类型工具批次不得合并成永不完成的巨型段 ---
+const events3 = [
+  // 轮 1：bash → result
+  { type: 'user/message', seq: 300, data: { content: [{ type: 'text', text: '轮1' }] } },
+  { type: 'assistant/message', seq: 301, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"echo a > /x/1.txt"}' }] } } },
+  { type: 'tool/result', seq: 302, data: {} },
+  // 轮 2：又是 bash（同类型，但被用户消息隔开 → 必须分属两个 episode）
+  { type: 'user/message', seq: 303, data: { content: [{ type: 'text', text: '轮2' }] } },
+  { type: 'assistant/message', seq: 304, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"echo b > /x/2.txt"}' }] } } },
+  { type: 'tool/result', seq: 305, data: {} },
+]
+const eps3 = deriveEpisodes(events3)
+const acts3 = eps3.filter((e) => e.type === 'act')
+assert.equal(acts3.length, 2, 'user/message boundary should split same-type batches into separate act episodes')
+assert.equal(acts3[0].endSeq, 302, 'first act should close at its own tool result, not extend into round 2')
+assert.equal(acts3[1].startSeq, 304, 'second act starts after the second user message')
+
+console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段')

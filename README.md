@@ -27,7 +27,8 @@ episodes whose effects are already persisted. **User messages are never evicted.
 
 1. **Episode inference (automatic, no agent annotation needed)**: consecutive same-type tool
    batches merge into semantic episodes (`expl` for read/search, `act` for bash/edit/write);
-   an `act` that touches files an earlier `expl` read gets a dependency edge.
+   each user message closes the current episode (a turn boundary), so episodes stay bounded
+   per round. An `act` that touches files an earlier `expl` read gets a dependency edge.
 2. **Pressure metering**: real context pressure = input + cacheRead + output + reasoning tokens
    (accumulated from `assistant/message` usage events — `tokenMeter.measure().totalTokens` omits
    cacheRead, which dominates long sessions).

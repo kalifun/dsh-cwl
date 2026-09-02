@@ -119,7 +119,9 @@ export function apply(ctx) {
     try {
       const PRESERVE_RECENT = 2
       const surface = session.surface?.nodes ?? []
-      const newestAllowed = surface.length > PRESERVE_RECENT ? surface[surface.length - 1 - PRESERVE_RECENT] : -1
+      // surface 在 replace 后无序（marker 的新 seq 插入中间），边界必须按排序取
+      const sorted = [...surface].sort((a, b) => a - b)
+      const newestAllowed = sorted.length > PRESERVE_RECENT ? sorted[sorted.length - 1 - PRESERVE_RECENT] : -1
       const picks = collectTargets(session, surface, newestAllowed)
       if (picks.length) {
         if (evictBatch) {
@@ -189,7 +191,8 @@ export function apply(ctx) {
             }
             const episodes = deriveEpisodes(session.events)
             const surface = session.surface?.nodes ?? []
-            const newestAllowed = surface.length > 2 ? surface[surface.length - 3] : -1
+            const sorted = [...surface].sort((a, b) => a - b)
+            const newestAllowed = sorted.length > 2 ? sorted[sorted.length - 3] : -1
             const target = pickEvictionTarget(session.events, surface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow })
             if (!target) {
               res.writeHead(200, { 'content-type': 'application/json' })
