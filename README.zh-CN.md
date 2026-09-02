@@ -51,16 +51,17 @@ dsh plugin --profile <name> add github:kalifun/dsh-cwl  # 或从 GitHub 安装
 DSH_CWL_BUDGET=30000 dsh web
 ```
 
-实验开关(任务二 cache 优化用,默认全部等于现状行为):
+驱逐策略(确定性重放验证:驱逐价值 −24% cacheRead、策略无关;batch 均值最优 −24.7%、7 会话方向一致 → 默认如下,可用环境变量覆盖):
 
-| 环境变量 | 取值 | 作用 |
-|---------|------|------|
-| `DSH_CWL_EVICT_ORDER` | `oldest`(默认)/ `tail` | `tail` 优先驱逐最新已完成段——保持前缀缓存连续性 |
-| `DSH_CWL_EVICT_BATCH` | `1` / `true` | 合并相邻 episode 为一次 surface replace(减少缓存打断次数) |
-| `DSH_CWL_EVICT_TAIL_WINDOW` | `N`(0 = 不限制) | 只驱逐 end 落在最近 N 个 surface 节点内的段 |
+| 环境变量 | 默认 | 取值 | 作用 |
+|---------|------|------|------|
+| `DSH_CWL_EVICT_ORDER` | `tail` | `tail` / `oldest` | `oldest` 优先驱逐最老段 |
+| `DSH_CWL_EVICT_BATCH` | 开 | `0` / `false` / `off` 关闭 | 合并相邻 episode 为一次 surface replace(减少缓存打断) |
+| `DSH_CWL_EVICT_TAIL_WINDOW` | 0 | `N` | 只驱逐 end 落在最近 N 个 surface 节点内的段 |
 
 ```bash
-DSH_CWL_EVICT_ORDER=tail DSH_CWL_EVICT_BATCH=1 dsh web
+# 回退到保守配置(oldest + 逐段 replace)
+DSH_CWL_EVICT_ORDER=oldest DSH_CWL_EVICT_BATCH=0 dsh web
 ```
 
 会话分析(逐轮 token 明细 + "驱逐后下一轮 cacheRead" 指标):

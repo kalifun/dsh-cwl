@@ -64,16 +64,19 @@ exceeds budget.
 DSH_CWL_BUDGET=30000 dsh web
 ```
 
-Experiment switches (task-2 cache optimization, all default to current behavior):
+Eviction policy (deterministic cache-replay validation: eviction −24% cacheRead,
+strategy-independent; batch best mean −24.7%, consistent across 7 sessions → defaults
+below; override via env):
 
-| Env var | Values | Effect |
-|---------|--------|--------|
-| `DSH_CWL_EVICT_ORDER` | `oldest` (default) / `tail` | `tail` prefers the newest completed episodes — preserves the prefix-cache continuity |
-| `DSH_CWL_EVICT_BATCH` | `1` / `true` | merge adjacent episodes into one surface replace (fewer cache breaks) |
-| `DSH_CWL_EVICT_TAIL_WINDOW` | `N` (0 = off) | only evict episodes whose end falls within the last N surface nodes |
+| Env var | Default | Values | Effect |
+|---------|---------|--------|--------|
+| `DSH_CWL_EVICT_ORDER` | `tail` | `tail` / `oldest` | `oldest` evicts oldest episodes first |
+| `DSH_CWL_EVICT_BATCH` | on | `0` / `false` / `off` to disable | merge adjacent episodes into one surface replace (fewer cache breaks) |
+| `DSH_CWL_EVICT_TAIL_WINDOW` | 0 | `N` | only evict episodes whose end falls within the last N surface nodes |
 
 ```bash
-DSH_CWL_EVICT_ORDER=tail DSH_CWL_EVICT_BATCH=1 dsh web
+# back to the conservative config (oldest, per-episode replaces)
+DSH_CWL_EVICT_ORDER=oldest DSH_CWL_EVICT_BATCH=0 dsh web
 ```
 
 Session analysis (per-round token breakdown + "cacheRead of the round after an eviction"):

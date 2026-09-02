@@ -84,13 +84,14 @@ export function apply(ctx) {
     return ev
   }
 
-  // 核心：agent/pre-step 瀑布 —— 每次 LLM 调用前检查压力，超阈值分级驱逐
-  // 实验开关（任务二 cache 优化，默认 = 现状行为）：
-  //   DSH_CWL_EVICT_ORDER       oldest（默认，最老优先）| tail（尾部优先，保前缀缓存）
-  //   DSH_CWL_EVICT_BATCH       1|true：合并相邻 episode 为一次 surface replace（减缓存打断）
+  // 驱逐策略（确定性重放验证：驱逐价值 -24% cacheRead 策略无关；batch 均值最优 -24.7%，
+  // 7 会话 6 优方向一致 → 默认 tail+batch，可用环境变量回退/覆盖）：
+  //   DSH_CWL_EVICT_ORDER       tail（默认）| oldest（最老优先）
+  //   DSH_CWL_EVICT_BATCH       默认开；0|false|off 关闭（逐段 replace）
   //   DSH_CWL_EVICT_TAIL_WINDOW N：只驱逐 endSeq 落在最近 N 个 surface 节点内的段（0=不限制）
-  const evictOrder = process.env.DSH_CWL_EVICT_ORDER === 'tail' ? 'tail' : 'oldest'
-  const evictBatch = process.env.DSH_CWL_EVICT_BATCH === '1' || process.env.DSH_CWL_EVICT_BATCH === 'true'
+  const evictOrder = process.env.DSH_CWL_EVICT_ORDER === 'oldest' ? 'oldest' : 'tail'
+  const evictBatchRaw = process.env.DSH_CWL_EVICT_BATCH
+  const evictBatch = evictBatchRaw === undefined ? true : !['0', 'false', 'off'].includes(evictBatchRaw)
   const evictTailWindow = Math.max(0, Number(process.env.DSH_CWL_EVICT_TAIL_WINDOW) || 0)
 
   /** 收集本轮要驱逐的 episode（预算内停止；逐次过滤已选段，避免重复驱逐）。 */
