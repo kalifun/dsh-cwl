@@ -63,6 +63,11 @@ export function deriveEpisodes(events, opts = {}) {
   // 段内最大批次：长任务(单请求连续几十个工具调用)在无用户消息/类型转换时
   // 也会被强制关段，避免整个任务塌缩成一个永不完成的巨型 act。
   const MAX_BATCHES = opts.maxBatches ?? 6
+  // surface 模式：传入当前 surface 时，按 surface 顺序(模型可见顺序)重推，
+  // 而非日志顺序。内容裁剪/整段驱逐后事件历史不可变，但 surface 已更新：
+  // 被遮蔽的原节点(如被 stub 替换的大 tool/result)从重推中消失，段的边界
+  // 落到仍在 surface 的节点上(stub 或相邻节点)——整段驱逐的 replace
+  // [start,end] 才能找到端点，不会抛 "end seq not found in surface"。
   const episodes = []
   let explCount = 0
   let actCount = 0
@@ -71,8 +76,12 @@ export function deriveEpisodes(events, opts = {}) {
   const flush = () => {
     if (cur) { cur.completed = true; episodes.push(cur); cur = null }
   }
+  const bySeq = new Map(events.map((e) => [e.seq, e]))
+  const stream = opts.surface
+    ? opts.surface.map((seq) => bySeq.get(seq)).filter(Boolean)
+    : events
 
-  for (const ev of events) {
+  for (const ev of stream) {
     const type = ev?.type
     const data = ev.data ?? {}
     if (type === 'user/message') {
@@ -147,7 +156,7 @@ export function deriveEpisodes(events, opts = {}) {
  */
 export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
   const { order = 'oldest', tailWindow = 0, exclude = null } = opts
-  const episodes = deriveEpisodes(events)
+  const episodes = deriveEpisodes(events, { surface })
   const surfaceSet = new Set(surface)
   const depended = new Set()
   for (const ep of episodes) if (ep.type === 'act') for (const d of ep.deps ?? []) depended.add(d)

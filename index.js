@@ -127,7 +127,7 @@ export function apply(ctx) {
     const toEvict = []
     const toStrip = []
     const excluded = new Set() // 本步已裁剪的 expl，不整段驱逐
-    const episodes = deriveEpisodes(session.events)
+    const episodes = deriveEpisodes(session.events, { surface })
     const byStart = new Map(episodes.map((e) => [e.startSeq, e]))
     const sid = session.id
     const stripped = strippedSeqs.get(sid) ?? new Set()
@@ -236,7 +236,7 @@ export function apply(ctx) {
               res.writeHead(404, { 'content-type': 'application/json' })
               return res.end(JSON.stringify({ error: 'session not live' }))
             }
-            const episodes = deriveEpisodes(session.events)
+            const episodes = deriveEpisodes(session.events, { surface })
             const surface = session.surface?.nodes ?? []
             const sorted = [...surface].sort((a, b) => a - b)
             const newestAllowed = sorted.length > 2 ? sorted[sorted.length - 3] : -1

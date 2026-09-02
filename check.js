@@ -154,4 +154,22 @@ assert.notEqual(sMsg.content[0].content[0].text, oMsg.content[0].content[0].text
 const t9 = pickEvictionTarget(events, surface, 108, { exclude: new Set([100]) })
 assert.notEqual(t9?.label, 'expl-1', 'exclude should skip expl-1 (startSeq 100)')
 
+// --- 裁剪后驱逐回归: endSeq 必须映射到 surface 内节点(strip bug 修复) ---
+const events7 = [
+  { type: 'assistant/message', seq: 700, data: { message: { content: [{ type: 'tool-call', name: 'read', arguments: '{"file_path":"/f.js"}' }] } } },
+  { type: 'tool/result', seq: 701, data: { message: { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'c7', content: [{ type: 'text', text: 'y'.repeat(3000) }] }] } } },
+  // 裁剪: 701 被 stub 节点 702 替换(surface 变 [700, 702],事件历史不变)
+  { type: 'tool/result', seq: 702, surfaceOp: { op: 'replace', start: 701, end: 701 }, data: { message: { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'c7', content: [{ type: 'text', text: '[cwl-stub]' }] }] } } },
+]
+const surface7 = [700, 702]
+const eps7 = deriveEpisodes(events7, { surface: surface7 })
+const expl7 = eps7.find((e) => e.type === 'expl')
+assert.equal(expl7?.endSeq, 702, 'after strip, episode endSeq must map to the in-surface stub node, not the shadowed 701')
+const pick7 = pickEvictionTarget(events7, surface7, 702)
+assert.ok(pick7, 'stripped episode must remain evictable')
+assert.ok(new Set(surface7).has(pick7.start) && new Set(surface7).has(pick7.end), 'evict range endpoints must both be in surface (evictRange won not throw)')
+// 无 surface 的纯事件语义:702 作为普通 tool/result 也在事件流中,同样被计入
+const eps7b = deriveEpisodes(events7)
+assert.deepEqual(eps7b.find((e) => e.type === 'expl').resultSeqs, [701, 702], 'pure event analysis sees both results')
+
 console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限 / resultSeqs / largeResultSeqs / stub同构 / exclude')
