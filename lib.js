@@ -101,21 +101,51 @@ export function deriveEpisodes(events) {
 /**
  * 分级驱逐选择：选下一个可驱逐的 episode。
  * 优先级：expl（纯上下文）> act；被依赖 expl 保护；已遮蔽/最新尾巴跳过。
+ * opts（实验开关，默认 = 现状行为）：
+ *   order      'oldest'（默认，最老优先）| 'tail'（尾部优先，保前缀缓存）
+ *   tailWindow 仅考虑 endSeq 落在最近 N 个 surface 节点内的 episode（0 = 不限制）
  */
-export function pickEvictionTarget(events, surface, newestAllowed) {
+export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
+  const { order = 'oldest', tailWindow = 0 } = opts
   const episodes = deriveEpisodes(events)
   const surfaceSet = new Set(surface)
   const depended = new Set()
   for (const ep of episodes) if (ep.type === 'act') for (const d of ep.deps ?? []) depended.add(d)
+  const tailFloor = tailWindow > 0 && surface.length > tailWindow
+    ? surface[surface.length - 1 - tailWindow]
+    : -1
   let best = null
   for (const ep of episodes) {
     if (!ep.completed) continue
     if (!surfaceSet.has(ep.startSeq)) continue
     if (ep.endSeq > newestAllowed) continue
     if (ep.type === 'expl' && depended.has(ep.name)) continue
-    const score = (ep.type === 'expl' ? 0 : 10) + ep.startSeq / 1e9
+    if (tailFloor >= 0 && ep.endSeq < tailFloor) continue
+    // 分数越低越优先：expl(0) < act(10)；order=tail 时 endSeq 越大越优先
+    const score = order === 'tail'
+      ? (ep.type === 'expl' ? 0 : 10) - ep.endSeq / 1e9
+      : (ep.type === 'expl' ? 0 : 10) + ep.startSeq / 1e9
     if (best === null || score < best.score) best = { ...ep, score }
   }
   if (!best) return null
   return { start: best.startSeq, end: best.endSeq, label: best.name, type: best.type, readPaths: best.readPaths ?? [] }
+}
+
+/**
+ * 合并相邻/重叠区间（E2 批处理：多个 episode 合并为一次 surface replace，
+ * 减少对前缀缓存的打断次数）。纯函数，可独立测试。
+ */
+export function mergeRanges(ranges) {
+  const sorted = [...ranges].sort((a, b) => a.start - b.start)
+  const merged = []
+  for (const r of sorted) {
+    const last = merged[merged.length - 1]
+    if (last && r.start <= last.end + 1) {
+      last.end = Math.max(last.end, r.end)
+      last.labels.push(r.label)
+    } else {
+      merged.push({ start: r.start, end: r.end, labels: [r.label] })
+    }
+  }
+  return merged
 }

@@ -63,6 +63,24 @@ exceeds budget.
 DSH_CWL_BUDGET=30000 dsh web
 ```
 
+Experiment switches (task-2 cache optimization, all default to current behavior):
+
+| Env var | Values | Effect |
+|---------|--------|--------|
+| `DSH_CWL_EVICT_ORDER` | `oldest` (default) / `tail` | `tail` prefers the newest completed episodes — preserves the prefix-cache continuity |
+| `DSH_CWL_EVICT_BATCH` | `1` / `true` | merge adjacent episodes into one surface replace (fewer cache breaks) |
+| `DSH_CWL_EVICT_TAIL_WINDOW` | `N` (0 = off) | only evict episodes whose end falls within the last N surface nodes |
+
+```bash
+DSH_CWL_EVICT_ORDER=tail DSH_CWL_EVICT_BATCH=1 dsh web
+```
+
+Session analysis (per-round token breakdown + "cacheRead of the round after an eviction"):
+
+```bash
+node tools/analyze-session.mjs <session.jsonl>
+```
+
 Agent-facing tools:
 
 | Tool | Purpose |

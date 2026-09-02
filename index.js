@@ -20,7 +20,7 @@
 // HTTP：/api/cwl/evictions（驱逐记录）、/api/cwl/force（调试：强制驱逐一次）
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { deriveEpisodes, pickEvictionTarget } from './lib.js'
+import { deriveEpisodes, mergeRanges, pickEvictionTarget } from './lib.js'
 
 export const name = 'dsh-cwl'
 export const inject = ['webServer', 'agents', 'tokenMeter', 'compaction', 'tools']
@@ -85,6 +85,29 @@ export function apply(ctx) {
   }
 
   // 核心：agent/pre-step 瀑布 —— 每次 LLM 调用前检查压力，超阈值分级驱逐
+  // 实验开关（任务二 cache 优化，默认 = 现状行为）：
+  //   DSH_CWL_EVICT_ORDER       oldest（默认，最老优先）| tail（尾部优先，保前缀缓存）
+  //   DSH_CWL_EVICT_BATCH       1|true：合并相邻 episode 为一次 surface replace（减缓存打断）
+  //   DSH_CWL_EVICT_TAIL_WINDOW N：只驱逐 endSeq 落在最近 N 个 surface 节点内的段（0=不限制）
+  const evictOrder = process.env.DSH_CWL_EVICT_ORDER === 'tail' ? 'tail' : 'oldest'
+  const evictBatch = process.env.DSH_CWL_EVICT_BATCH === '1' || process.env.DSH_CWL_EVICT_BATCH === 'true'
+  const evictTailWindow = Math.max(0, Number(process.env.DSH_CWL_EVICT_TAIL_WINDOW) || 0)
+
+  /** 收集本轮要驱逐的 episode（预算内停止；逐次过滤已选段，避免重复驱逐）。 */
+  function collectTargets(session, surface, newestAllowed) {
+    const picks = []
+    let guard = 0
+    while (guard++ < 20) {
+      const current = usageTokens(session)
+      if (current <= budgetTokens(session)) break
+      const liveSurface = surface.filter((s) => !picks.some((p) => s >= p.start && s <= p.end))
+      const target = pickEvictionTarget(session.events, liveSurface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow })
+      if (!target) break
+      picks.push(target)
+    }
+    return picks
+  }
+
   ctx.on('agent/pre-step', async (payload, next) => {
     const agent = payload?.agent
     const session = agent?.session
@@ -97,15 +120,22 @@ export function apply(ctx) {
       const PRESERVE_RECENT = 2
       const surface = session.surface?.nodes ?? []
       const newestAllowed = surface.length > PRESERVE_RECENT ? surface[surface.length - 1 - PRESERVE_RECENT] : -1
-      let guard = 0
-      while (guard++ < 20) {
-        const current = usageTokens(session)
-        if (current <= budget) break
-        const target = pickEvictionTarget(session.events, surface, newestAllowed)
-        if (!target) break
-        evictRange(session, target.start, target.end, { name: target.label, type: target.type, readPaths: target.readPaths })
+      const picks = collectTargets(session, surface, newestAllowed)
+      if (picks.length) {
+        if (evictBatch) {
+          // E2：合并相邻段为一次 replace，减少缓存打断次数
+          for (const { start, end, labels } of mergeRanges(picks)) {
+            evictRange(session, start, end, {
+              name: labels.join('+'),
+              type: picks[0].type,
+              readPaths: picks.flatMap((p) => p.readPaths ?? []),
+            })
+          }
+        } else {
+          for (const t of picks) evictRange(session, t.start, t.end, { name: t.label, type: t.type, readPaths: t.readPaths })
+        }
       }
-      console.log(`[dsh-cwl] ${session.id} 驱逐后 ${usageTokens(session)}/${budget} tokens`)
+      console.log(`[dsh-cwl] ${session.id} 驱逐后 ${usageTokens(session)}/${budget} tokens（order=${evictOrder} batch=${evictBatch} tailWindow=${evictTailWindow}，驱逐 ${picks.length} 段）`)
     } catch (e) {
       console.warn('[dsh-cwl] 驱逐失败（不阻断）:', e?.message ?? e)
     }
@@ -160,7 +190,7 @@ export function apply(ctx) {
             const episodes = deriveEpisodes(session.events)
             const surface = session.surface?.nodes ?? []
             const newestAllowed = surface.length > 2 ? surface[surface.length - 3] : -1
-            const target = pickEvictionTarget(session.events, surface, newestAllowed)
+            const target = pickEvictionTarget(session.events, surface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow })
             if (!target) {
               res.writeHead(200, { 'content-type': 'application/json' })
               return res.end(JSON.stringify({ ok: true, evicted: 0, note: 'no evictable episode' }))

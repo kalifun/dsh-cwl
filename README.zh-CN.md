@@ -51,6 +51,24 @@ dsh plugin --profile <name> add github:kalifun/dsh-cwl  # 或从 GitHub 安装
 DSH_CWL_BUDGET=30000 dsh web
 ```
 
+实验开关(任务二 cache 优化用,默认全部等于现状行为):
+
+| 环境变量 | 取值 | 作用 |
+|---------|------|------|
+| `DSH_CWL_EVICT_ORDER` | `oldest`(默认)/ `tail` | `tail` 优先驱逐最新已完成段——保持前缀缓存连续性 |
+| `DSH_CWL_EVICT_BATCH` | `1` / `true` | 合并相邻 episode 为一次 surface replace(减少缓存打断次数) |
+| `DSH_CWL_EVICT_TAIL_WINDOW` | `N`(0 = 不限制) | 只驱逐 end 落在最近 N 个 surface 节点内的段 |
+
+```bash
+DSH_CWL_EVICT_ORDER=tail DSH_CWL_EVICT_BATCH=1 dsh web
+```
+
+会话分析(逐轮 token 明细 + "驱逐后下一轮 cacheRead" 指标):
+
+```bash
+node tools/analyze-session.mjs <session.jsonl>
+```
+
 面向智能体的工具:
 
 | 工具 | 用途 |

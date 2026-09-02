@@ -1,6 +1,6 @@
 // dsh-cwl 纯函数单元测试：node check.js
 import assert from 'node:assert/strict'
-import { deriveEpisodes, pickEvictionTarget } from './lib.js'
+import { deriveEpisodes, mergeRanges, pickEvictionTarget } from './lib.js'
 
 // --- deriveEpisodes：阶段合并 + 依赖推断 ---
 const events = [
@@ -44,4 +44,41 @@ assert.equal(t2?.type, 'expl', 'should prefer expl when available')
 const t3 = pickEvictionTarget(events, [100, 101, 107, 108], 108)
 assert.notEqual(t3?.label, 'act-1', 'evicted act-1 should not be re-picked')
 
-console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除')
+// --- 实验开关：order=tail（尾部优先，保前缀缓存） ---
+const t4 = pickEvictionTarget(events, surface, 108, { order: 'tail' })
+assert.equal(t4?.label, 'expl-2', 'tail order should prefer expl with largest endSeq (expl-2=108)')
+
+// --- 实验开关：tailWindow（只驱逐 endSeq 落在最近 N 个 surface 节点内的段） ---
+// floor = surface[len-1-N]；tailWindow=1 → floor=107 → 只有 expl-2(108) 达标
+const t5 = pickEvictionTarget(events, surface, 108, { tailWindow: 1 })
+assert.equal(t5?.label, 'expl-2', 'tailWindow=1 should restrict to endSeq >= 107 (expl-2)')
+// tailWindow=4 → floor=104；expl-1(104) 达标但被 act-1 依赖保护 → 取 expl-2
+const t6 = pickEvictionTarget(events, surface, 108, { tailWindow: 4 })
+assert.equal(t6?.label, 'expl-2', 'tailWindow=4 floor=104; expl-1 protected by dep, expl-2 wins')
+
+// --- tailWindow floor 语义（无依赖 fixture，排除依赖保护干扰） ---
+const events2 = [
+  { type: 'assistant/message', seq: 200, data: { message: { content: [{ type: 'tool-call', name: 'read', arguments: '{"file_path":"/x/a.js"}' }] } } },
+  { type: 'tool/result', seq: 201, data: {} },
+  { type: 'assistant/message', seq: 202, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"echo hi"}' }] } } },
+  { type: 'tool/result', seq: 203, data: {} },
+  { type: 'assistant/message', seq: 204, data: { message: { content: [{ type: 'tool-call', name: 'read', arguments: '{"file_path":"/x/b.js"}' }] } } },
+  { type: 'tool/result', seq: 205, data: {} },
+]
+const surface2 = [200, 201, 202, 203, 204, 205]
+const t7 = pickEvictionTarget(events2, surface2, 205, { tailWindow: 1 })
+assert.equal(t7?.label, 'expl-2', 'tailWindow=1 floor=204 excludes expl-1(end=201) and act-1(end=203)')
+const t8 = pickEvictionTarget(events2, surface2, 205, { tailWindow: 4 })
+assert.equal(t8?.label, 'expl-1', 'tailWindow=4 floor=201 allows expl-1; oldest order picks it')
+
+// --- mergeRanges：相邻合并、间隔分开 ---
+const mr = mergeRanges([
+  { start: 100, end: 104, label: 'expl-1' },
+  { start: 105, end: 106, label: 'act-1' },
+  { start: 108, end: 108, label: 'expl-2' },
+])
+assert.equal(mr.length, 2, '100-106 adjacent merged, 108 separate (gap at 107)')
+assert.deepEqual(mr[0], { start: 100, end: 106, labels: ['expl-1', 'act-1'] }, 'merged range covers 100-106 with both labels')
+assert.deepEqual(mr[1], { start: 108, end: 108, labels: ['expl-2'] }, 'non-adjacent range stays separate')
+
+console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges')

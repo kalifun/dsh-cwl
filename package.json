@@ -15,6 +15,7 @@
     "README.md",
     "README.zh-CN.md",
     "check.js",
+    "tools/",
     "LICENSE"
   ],
   "scripts": {
