@@ -76,6 +76,8 @@ below; override via env):
 | `DSH_CWL_EVICT_ORDER` | `tail` | `tail` / `oldest` | `oldest` evicts oldest episodes first |
 | `DSH_CWL_EVICT_BATCH` | on | `0` / `false` / `off` to disable | merge adjacent episodes into one surface replace (fewer cache breaks) |
 | `DSH_CWL_EVICT_TAIL_WINDOW` | 0 | `N` | only evict episodes whose end falls within the last N surface nodes |
+| `DSH_CWL_STRIP` | on | `0` to disable | fine-grained level: stub large tool-result content in expl episodes before whole-episode eviction (structure preserved) |
+| `DSH_CWL_STRIP_THRESHOLD` | 1500 | chars | minimum result text length to be stubbed |
 
 ```bash
 # back to the conservative config (oldest, per-episode replaces)

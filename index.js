@@ -20,7 +20,7 @@
 // HTTP：/api/cwl/evictions（驱逐记录）、/api/cwl/force（调试：强制驱逐一次）
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { deriveEpisodes, mergeRanges, pickEvictionTarget } from './lib.js'
+import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, stubToolResultData, toolResultText } from './lib.js'
 
 export const name = 'dsh-cwl'
 export const inject = ['webServer', 'agents', 'tokenMeter', 'compaction', 'tools']
@@ -93,20 +93,60 @@ export function apply(ctx) {
   const evictBatchRaw = process.env.DSH_CWL_EVICT_BATCH
   const evictBatch = evictBatchRaw === undefined ? true : !['0', 'false', 'off'].includes(evictBatchRaw)
   const evictTailWindow = Math.max(0, Number(process.env.DSH_CWL_EVICT_TAIL_WINDOW) || 0)
+  // 细粒度裁剪开关：expl 大结果先内容裁剪(细)，整段驱逐(粗)兜底；默认开
+  const stripBig = process.env.DSH_CWL_STRIP === '0' ? false : true
+  const stripThreshold = Number(process.env.DSH_CWL_STRIP_THRESHOLD) || 1500
+  // 已裁剪的 tool/result seq（sid → Set<seq>）；事件流不变，需运行态记忆
+  const strippedSeqs = new Map()
 
-  /** 收集本轮要驱逐的 episode（预算内停止；逐次过滤已选段，避免重复驱逐）。 */
+  /** 裁剪一个 tool/result 节点的内容（surface 内容改写，保持工具配对与结构）。 */
+  function stripResult(session, resultSeq) {
+    const sid = session.id
+    const ev = session.events.find((e) => e.seq === resultSeq && e.type === 'tool/result')
+    if (!ev) return false
+    const text = toolResultText(ev)
+    const stubText = `[cwl-stub: 工具结果 ${text.length} 字符已裁剪，需要时可用原工具重跑]`
+    const rewritten = stubToolResultData(ev, stubText)
+    session.append('tool/result', rewritten, {
+      surfaceOp: { op: 'replace', start: resultSeq, end: resultSeq },
+      sourceEventSeqs: [resultSeq],
+    })
+    if (!strippedSeqs.has(sid)) strippedSeqs.set(sid, new Set())
+    strippedSeqs.get(sid).add(resultSeq)
+    return true
+  }
+
+  /** 收集本轮动作：{toEvict: 整段驱逐, toStrip: expl 大结果内容裁剪}。
+   *  分级：expl 有未裁剪大结果 → 先细粒度裁剪(留结构)；无大结果/已裁 → 整段驱逐(粗)。
+   */
   function collectTargets(session, surface, newestAllowed) {
-    const picks = []
+    const toEvict = []
+    const toStrip = []
+    const excluded = new Set() // 本步已裁剪的 expl，不整段驱逐
+    const episodes = deriveEpisodes(session.events)
+    const byStart = new Map(episodes.map((e) => [e.startSeq, e]))
+    const sid = session.id
+    const stripped = strippedSeqs.get(sid) ?? new Set()
     let guard = 0
     while (guard++ < 20) {
-      const current = usageTokens(session)
-      if (current <= budgetTokens(session)) break
-      const liveSurface = surface.filter((s) => !picks.some((p) => s >= p.start && s <= p.end))
-      const target = pickEvictionTarget(session.events, liveSurface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow })
+      if (usageTokens(session) <= budgetTokens(session)) break
+      const occupied = [...toEvict, ...toStrip]
+      const liveSurface = surface.filter((s) => !occupied.some((p) => s >= p.start && s <= p.end))
+      const target = pickEvictionTarget(session.events, liveSurface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow, exclude: excluded })
       if (!target) break
-      picks.push(target)
+      const ep = byStart.get(target.start)
+      if (ep?.type === 'expl' && stripBig) {
+        const big = largeResultSeqs(session.events, ep, liveSurface, stripThreshold)
+        const todo = big.filter((x) => !stripped.has(x.seq))
+        if (todo.length) {
+          toStrip.push({ start: target.start, end: target.end, seqs: todo.map((x) => x.seq) })
+          excluded.add(target.start)
+          continue
+        }
+      }
+      toEvict.push(target)
     }
-    return picks
+    return { toEvict, toStrip }
   }
 
   ctx.on('agent/pre-step', async (payload, next) => {
@@ -123,22 +163,24 @@ export function apply(ctx) {
       // surface 在 replace 后无序（marker 的新 seq 插入中间），边界必须按排序取
       const sorted = [...surface].sort((a, b) => a - b)
       const newestAllowed = sorted.length > PRESERVE_RECENT ? sorted[sorted.length - 1 - PRESERVE_RECENT] : -1
-      const picks = collectTargets(session, surface, newestAllowed)
-      if (picks.length) {
+      const { toEvict, toStrip } = collectTargets(session, surface, newestAllowed)
+      let strippedCount = 0
+      for (const s of toStrip) for (const seq of s.seqs) if (stripResult(session, seq)) strippedCount++
+      if (toEvict.length) {
         if (evictBatch) {
           // E2：合并相邻段为一次 replace，减少缓存打断次数
-          for (const { start, end, labels } of mergeRanges(picks)) {
+          for (const { start, end, labels } of mergeRanges(toEvict)) {
             evictRange(session, start, end, {
               name: labels.join('+'),
-              type: picks[0].type,
-              readPaths: picks.flatMap((p) => p.readPaths ?? []),
+              type: toEvict[0].type,
+              readPaths: toEvict.flatMap((p) => p.readPaths ?? []),
             })
           }
         } else {
-          for (const t of picks) evictRange(session, t.start, t.end, { name: t.label, type: t.type, readPaths: t.readPaths })
+          for (const t of toEvict) evictRange(session, t.start, t.end, { name: t.label, type: t.type, readPaths: t.readPaths })
         }
       }
-      console.log(`[dsh-cwl] ${session.id} 驱逐后 ${usageTokens(session)}/${budget} tokens（order=${evictOrder} batch=${evictBatch} tailWindow=${evictTailWindow}，驱逐 ${picks.length} 段）`)
+      console.log(`[dsh-cwl] ${session.id} 驱逐后 ${usageTokens(session)}/${budget} tokens（order=${evictOrder} batch=${evictBatch}，整段驱逐 ${toEvict.length}，内容裁剪 ${strippedCount}）`)
     } catch (e) {
       console.warn('[dsh-cwl] 驱逐失败（不阻断）:', e?.message ?? e)
     }

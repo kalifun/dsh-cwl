@@ -108,16 +108,17 @@ export function deriveEpisodes(events, opts = {}) {
           explCount += 1
           cur = { name: `expl-${explCount}`, type: 'expl', startSeq: ev.seq, endSeq: ev.seq,
                   batches: [{ seq: ev.seq, names, readPaths, touchedPaths: [] }], toolNames: [...names],
-                  readPaths: [...readPaths], deps: [], touchedPaths: [], completed: false }
+                  readPaths: [...readPaths], deps: [], touchedPaths: [], resultSeqs: [], completed: false }
         } else {
           actCount += 1
           cur = { name: `act-${actCount}`, type: 'act', startSeq: ev.seq, endSeq: ev.seq,
                   batches: [{ seq: ev.seq, names, readPaths, touchedPaths }], toolNames: [...names],
-                  readPaths: [...readPaths], deps: [], touchedPaths: [...touchedPaths], completed: false }
+                  readPaths: [...readPaths], deps: [], touchedPaths: [...touchedPaths], resultSeqs: [], completed: false }
         }
       }
     } else if (type === 'tool/result') {
-      if (cur) cur.endSeq = ev.seq
+      // 记录段内所有 tool/result 节点 seq(供细粒度内容裁剪定位)
+      if (cur) { cur.endSeq = ev.seq; cur.resultSeqs.push(ev.seq) }
     }
   }
   flush()
@@ -145,7 +146,7 @@ export function deriveEpisodes(events, opts = {}) {
  *   tailWindow 仅考虑 endSeq 落在最近 N 个 surface 节点内的 episode（0 = 不限制）
  */
 export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
-  const { order = 'oldest', tailWindow = 0 } = opts
+  const { order = 'oldest', tailWindow = 0, exclude = null } = opts
   const episodes = deriveEpisodes(events)
   const surfaceSet = new Set(surface)
   const depended = new Set()
@@ -160,6 +161,7 @@ export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
   let best = null
   for (const ep of episodes) {
     if (!ep.completed) continue
+    if (exclude && exclude.has(ep.startSeq)) continue
     if (!surfaceSet.has(ep.startSeq)) continue
     if (ep.endSeq > newestAllowed) continue
     if (ep.type === 'expl' && depended.has(ep.name)) continue
@@ -175,7 +177,55 @@ export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
 }
 
 /**
- * 合并相邻/重叠区间（E2 批处理：多个 episode 合并为一次 surface replace，
+ * 找出段内"大的 tool/result 节点"(细粒度内容裁剪的候选)。
+ * 只返回仍在 surface 中、且文本内容超过阈值的 tool/result seq。
+ * @param events 会话事件
+ * @param episode deriveEpisodes 输出的段(需含 resultSeqs)
+ * @param surface 当前 surface 节点(seq 数组)
+ * @param threshold 文本长度阈值(默认 1500 字符)
+ */
+export function largeResultSeqs(events, episode, surface, threshold = 1500) {
+  const inSurface = new Set(surface)
+  const bySeq = new Map(events.filter((e) => e.type === 'tool/result').map((e) => [e.seq, e]))
+  const out = []
+  for (const seq of episode.resultSeqs ?? []) {
+    if (!inSurface.has(seq)) continue
+    const ev = bySeq.get(seq)
+    const text = toolResultText(ev)
+    if (text && text.length >= threshold) out.push({ seq, chars: text.length })
+  }
+  return out
+}
+
+/** 提取 tool/result 节点的文本内容(兼容两种内容包裹结构)。 */
+export function toolResultText(ev) {
+  try {
+    const content = ev?.data?.message?.content ?? []
+    const block = content[0]
+    const inner = block?.content ?? []
+    const text = inner.filter((b) => typeof b === 'string' || b?.type === 'text').map((b) => (typeof b === 'string' ? b : b.text ?? '')).join('')
+    return text
+  } catch { return '' }
+}
+
+/**
+ * 把 tool/result 事件的 data 改造成"仅替换内容"的合法同构体：
+ * harness surface 校验(assertToolResultRewrite)只允许改 message.content[0].content，
+ * 其余字段必须深度相等。
+ */
+export function stubToolResultData(originalEvent, stubText) {
+  const d = originalEvent.data
+  const block = d.message.content[0]
+  return {
+    ...d,
+    message: {
+      ...d.message,
+      content: [{ ...block, content: [{ type: 'text', text: stubText }] }],
+    },
+  }
+}
+
+/** 合并相邻/重叠区间（E2 批处理：多个 episode 合并为一次 surface replace，
  * 减少对前缀缓存的打断次数）。纯函数，可独立测试。
  */
 export function mergeRanges(ranges) {

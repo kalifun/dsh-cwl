@@ -1,6 +1,6 @@
 // dsh-cwl 纯函数单元测试：node check.js
 import assert from 'node:assert/strict'
-import { deriveEpisodes, mergeRanges, pickEvictionTarget } from './lib.js'
+import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, stubToolResultData } from './lib.js'
 
 // --- deriveEpisodes：阶段合并 + 依赖推断 ---
 const events = [
@@ -124,4 +124,34 @@ assert.ok(acts5.length >= 3, `15 continuous edit batches should split into >=3 a
 assert.ok(acts5.every((e) => e.batches.length <= 6), 'no act episode should exceed the batch cap')
 assert.equal(acts5.reduce((a, e) => a + e.batches.length, 0), 15, 'all batches covered')
 
-console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限')
+// --- 细粒度裁剪: resultSeqs 收集 + largeResultSeqs 定位 + stub 数据同构 ---
+const events6 = [
+  { type: 'assistant/message', seq: 600, data: { message: { content: [{ type: 'tool-call', name: 'read', arguments: '{"file_path":"/big.js"}' }] } } },
+  { type: 'tool/result', seq: 601, data: { message: { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'x'.repeat(3000) }] }] } } },
+  { type: 'assistant/message', seq: 602, data: { message: { content: [{ type: 'tool-call', name: 'read', arguments: '{"file_path":"/small.js"}' }] } } },
+  { type: 'tool/result', seq: 603, data: { message: { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'c2', content: [{ type: 'text', text: 'tiny' }] }] } } },
+]
+const eps6 = deriveEpisodes(events6)
+const expl6 = eps6[0]
+assert.deepEqual(expl6.resultSeqs, [601, 603], 'episode should record its tool/result seqs')
+const surface6 = [600, 601, 602, 603]
+const big6 = largeResultSeqs(events6, expl6, surface6, 1500)
+assert.deepEqual(big6, [{ seq: 601, chars: 3000 }], 'largeResultSeqs should only find the 3000-char result')
+const gone6 = largeResultSeqs(events6, expl6, [600, 602, 603], 1500)
+assert.equal(gone6.length, 0, 'evicted/stubbed result (not in surface) must be excluded')
+
+// stubToolResultData: 仅 message.content[0].content 变化,其余字段同构
+const orig6 = events6[1]
+const stub6 = stubToolResultData(orig6, '[cwl-stub]')
+const sMsg = stub6.message, oMsg = orig6.data.message
+assert.equal(stub6.turn, orig6.data.turn, 'data.turn preserved')
+assert.equal(stub6.message.id, oMsg.id, 'message.id preserved')
+assert.equal(sMsg.content[0].toolCallId, oMsg.content[0].toolCallId, 'toolCallId preserved')
+assert.equal(sMsg.content[0].content[0].text, '[cwl-stub]', 'content replaced')
+assert.notEqual(sMsg.content[0].content[0].text, oMsg.content[0].content[0].text, 'text differs')
+
+// pickEvictionTarget exclude: 排除指定段
+const t9 = pickEvictionTarget(events, surface, 108, { exclude: new Set([100]) })
+assert.notEqual(t9?.label, 'expl-1', 'exclude should skip expl-1 (startSeq 100)')
+
+console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限 / resultSeqs / largeResultSeqs / stub同构 / exclude')

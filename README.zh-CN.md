@@ -58,6 +58,8 @@ DSH_CWL_BUDGET=30000 dsh web
 | `DSH_CWL_EVICT_ORDER` | `tail` | `tail` / `oldest` | `oldest` 优先驱逐最老段 |
 | `DSH_CWL_EVICT_BATCH` | 开 | `0` / `false` / `off` 关闭 | 合并相邻 episode 为一次 surface replace(减少缓存打断) |
 | `DSH_CWL_EVICT_TAIL_WINDOW` | 0 | `N` | 只驱逐 end 落在最近 N 个 surface 节点内的段 |
+| `DSH_CWL_STRIP` | 开 | `0` 关闭 | 细粒度级:整段驱逐前先裁剪 expl 段内的大工具结果内容(保留结构) |
+| `DSH_CWL_STRIP_THRESHOLD` | 1500 | 字符 | 结果文本超过该长度才裁剪 |
 
 ```bash
 # 回退到保守配置(oldest + 逐段 replace)
