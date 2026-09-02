@@ -48,7 +48,7 @@ dsh plugin --profile <name> add github:kalifun/dsh-cwl  # 或从 GitHub 安装
 
 ```bash
 # 可选:覆盖预算(tokens)——用于测试压力行为
-HELMSMAN_CWL_BUDGET=30000 dsh web
+DSH_CWL_BUDGET=30000 dsh web
 ```
 
 面向智能体的工具:

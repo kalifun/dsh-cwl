@@ -14,7 +14,7 @@
 // 故从 session 的 assistant/message usage 事件累计真实压力（input + cacheRead + output + reasoning）。
 //
 // 配置（环境变量）：
-//   HELMSMAN_CWL_BUDGET  — 覆盖预算（tokens）；默认 = 上下文窗口 80%
+//   DSH_CWL_BUDGET  — 覆盖预算（tokens）；默认 = 上下文窗口 80%
 //
 // 工具：cwl_recall（找回被驱逐段涉及的文件）
 // HTTP：/api/cwl/evictions（驱逐记录）、/api/cwl/force（调试：强制驱逐一次）
@@ -54,7 +54,7 @@ export function apply(ctx) {
 
   /** 预算：环境变量覆盖，或上下文窗口 80%。 */
   function budgetTokens(session) {
-    const override = Number(process.env.HELMSMAN_CWL_BUDGET)
+    const override = Number(process.env.DSH_CWL_BUDGET)
     if (Number.isFinite(override) && override > 0) return override
     const header = session.requestHeader?.()?.config
     const ctxWindow = header?.contextWindow ?? 128000

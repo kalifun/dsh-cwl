@@ -60,7 +60,7 @@ exceeds budget.
 
 ```bash
 # Optional: override the budget (tokens) — for testing pressure behavior
-HELMSMAN_CWL_BUDGET=30000 dsh web
+DSH_CWL_BUDGET=30000 dsh web
 ```
 
 Agent-facing tools:
