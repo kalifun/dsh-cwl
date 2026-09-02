@@ -113,6 +113,10 @@ export function apply(ctx) {
     })
     if (!strippedSeqs.has(sid)) strippedSeqs.set(sid, new Set())
     strippedSeqs.get(sid).add(resultSeq)
+    const list = evictionLog.get(sid) ?? []
+    list.push({ episode: ev.data.message?.content?.[0]?.toolCallId ? `result:${resultSeq}` : `result:${resultSeq}`, kind: 'strip', start: resultSeq, end: resultSeq, chars: text.length, at: Date.now() })
+    evictionLog.set(sid, list)
+    if (list.length > 50) list.shift()
     return true
   }
 
