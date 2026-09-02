@@ -60,7 +60,7 @@ assert.equal(t6?.label, 'expl-2', 'tailWindow=4 floor=104; expl-1 protected by d
 const events2 = [
   { type: 'assistant/message', seq: 200, data: { message: { content: [{ type: 'tool-call', name: 'read', arguments: '{"file_path":"/x/a.js"}' }] } } },
   { type: 'tool/result', seq: 201, data: {} },
-  { type: 'assistant/message', seq: 202, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"echo hi"}' }] } } },
+  { type: 'assistant/message', seq: 202, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"echo hi >> /x/c.txt"}' }] } } },
   { type: 'tool/result', seq: 203, data: {} },
   { type: 'assistant/message', seq: 204, data: { message: { content: [{ type: 'tool-call', name: 'read', arguments: '{"file_path":"/x/b.js"}' }] } } },
   { type: 'tool/result', seq: 205, data: {} },
@@ -98,4 +98,30 @@ assert.equal(acts3.length, 2, 'user/message boundary should split same-type batc
 assert.equal(acts3[0].endSeq, 302, 'first act should close at its own tool result, not extend into round 2')
 assert.equal(acts3[1].startSeq, 304, 'second act starts after the second user message')
 
-console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段')
+// --- 读写意图分类：只读 bash = expl，写 bash = act ---
+const events4 = [
+  { type: 'assistant/message', seq: 400, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"grep -n flush /x/lib.js | head"}' }] } } },
+  { type: 'tool/result', seq: 401, data: {} },
+  { type: 'assistant/message', seq: 402, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"cat /x/items.json"}' }] } } },
+  { type: 'tool/result', seq: 403, data: {} },
+  { type: 'assistant/message', seq: 404, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"echo fix >> /x/lib.js"}' }] } } },
+  { type: 'tool/result', seq: 405, data: {} },
+]
+const eps4 = deriveEpisodes(events4)
+assert.equal(eps4.filter((e) => e.type === 'expl').length, 1, 'read-only bash (grep/cat) should merge into one expl')
+assert.equal(eps4.filter((e) => e.type === 'act').length, 1, 'write bash (>>) should be act')
+assert.equal(eps4.find((e) => e.type === 'expl').batches.length, 2, 'both read-only bash batches in the expl')
+
+// --- 批次上限：连续 act 长跑强制分段，防巨型段塌缩 ---
+const events5 = []
+for (let i = 0; i < 15; i++) {
+  events5.push({ type: 'assistant/message', seq: 500 + i * 2, data: { message: { content: [{ type: 'tool-call', name: 'edit', arguments: JSON.stringify({ file_path: `/x/f${i}.js`, content: 'x' }) }] } } })
+  events5.push({ type: 'tool/result', seq: 501 + i * 2, data: {} })
+}
+const eps5 = deriveEpisodes(events5)
+const acts5 = eps5.filter((e) => e.type === 'act')
+assert.ok(acts5.length >= 3, `15 continuous edit batches should split into >=3 acts (got ${acts5.length})`)
+assert.ok(acts5.every((e) => e.batches.length <= 6), 'no act episode should exceed the batch cap')
+assert.equal(acts5.reduce((a, e) => a + e.batches.length, 0), 15, 'all batches covered')
+
+console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限')

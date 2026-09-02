@@ -29,14 +29,40 @@ function collectTouchedPaths(toolName, argsRaw) {
   } catch { return [] }
 }
 
+/** 从工具调用参数判断该调用是否为"只读"（无副作用）。 */
+const EXPL_TOOLS = new Set(['read', 'search', 'list', 'ls', 'glob', 'grep', 'find', 'web_search'])
+// bash 写特征（宽松：宁当 act 不当 expl——误剥纯上下文比晚驱逐危险）
+const BASH_WRITE_RE = />>|>|\bsed\s+-i\b|\brm\b|\bmv\b|\bcp\b|\btouch\b|\bmkdir\b|\bchmod\b|\bchown\b|\bln\b|\btee\b|\binstall\b|git\s+(add|commit|push|rm|mv)\b|(npm|pnpm|yarn)\s+(i|install|add)\b|curl\s+-[a-z]*o|wget\s+-O/
+function isReadOnlyCall(name, argsRaw) {
+  if (EXPL_TOOLS.has(name)) return true
+  if (name !== 'bash') return false // edit/write/str_replace_editor 等一律视为写
+  try {
+    const args = typeof argsRaw === 'string' ? JSON.parse(argsRaw) : argsRaw
+    const cmd = args?.command ?? ''
+    return !BASH_WRITE_RE.test(cmd)
+  } catch { return false }
+}
+
+/** 从命令里尽力提取只读 bash 引用到的路径（供依赖推断/召回；尽力而为）。 */
+function collectCommandPaths(argsRaw) {
+  try {
+    const args = typeof argsRaw === 'string' ? JSON.parse(argsRaw) : argsRaw
+    if (typeof args?.command !== 'string') return []
+    const m = args.command.matchAll(/[\w./-]+\.[a-z]+/g)
+    return [...new Set([...m].map((x) => x[0]).filter((x) => x.includes('/')))].slice(0, 5)
+  } catch { return [] }
+}
+
 /**
  * 从事件流推导 episode 图（阶段合并 + 依赖）。
  * 基础单元：每条含 tool-call 的 assistant/message → 一个 tool-batch；
  * 阶段合并：连续同类型合并为 expl（探索）/ act（动作）语义段；
  * 依赖推断：act 触碰的文件若之前 expl 读过 → deps 边（驱逐时保护）。
  */
-export function deriveEpisodes(events) {
-  const EXPL_TOOLS = new Set(['read', 'search', 'list', 'ls', 'glob', 'grep', 'find', 'web_search'])
+export function deriveEpisodes(events, opts = {}) {
+  // 段内最大批次：长任务(单请求连续几十个工具调用)在无用户消息/类型转换时
+  // 也会被强制关段，避免整个任务塌缩成一个永不完成的巨型 act。
+  const MAX_BATCHES = opts.maxBatches ?? 6
   const episodes = []
   let explCount = 0
   let actCount = 0
@@ -60,11 +86,17 @@ export function deriveEpisodes(events) {
       const content = data.message?.content ?? []
       const toolCalls = content.filter((b) => b?.type === 'tool-call')
       if (toolCalls.length === 0) continue
-      const isExpl = toolCalls.every((b) => EXPL_TOOLS.has(b.name))
-      const readPaths = toolCalls.flatMap((b) => collectReadPaths(b.name, b.arguments))
+      // 读写意图分类：read/grep/只读 bash = expl(纯上下文)；edit/write/写 bash = act
+      const isExpl = toolCalls.every((b) => isReadOnlyCall(b.name, b.arguments))
+      const readPaths = toolCalls.flatMap((b) =>
+        EXPL_TOOLS.has(b.name)
+          ? collectReadPaths(b.name, b.arguments)
+          : isReadOnlyCall(b.name, b.arguments) ? collectCommandPaths(b.arguments) : [],
+      )
       const names = toolCalls.map((b) => b.name)
       const touchedPaths = isExpl ? [] : toolCalls.flatMap((b) => collectTouchedPaths(b.name, b.arguments))
-      if (cur && cur.type === (isExpl ? 'expl' : 'act')) {
+      const inCap = cur && cur.batches.length < MAX_BATCHES
+      if (cur && cur.type === (isExpl ? 'expl' : 'act') && inCap) {
         cur.batches.push({ seq: ev.seq, names, readPaths, touchedPaths })
         cur.endSeq = ev.seq
         cur.toolNames.push(...names)
