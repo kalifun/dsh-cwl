@@ -114,18 +114,9 @@ Observability:
 node check.js          # pure-function unit checks (episode inference, eviction policy, strip, pairing)
 ```
 
-**0.2.x — long-horizon eviction (verified on the helmsman platform, task-1)**
-
-| work | outcome |
-|------|---------|
-| bounded segmentation (single-request long runs no longer collapse into one giant episode) | live scenario B ×3: 3/3 Done |
-| fine-grained graduated eviction (content stubbing before whole-episode eviction) | strip→evict two-phase works end-to-end |
-| three task-level bugs found in live verification (seq-endpoint window drift → shadowed mismatch → orphan tool messages), root-fixed by **positional-block eviction** | all zero in re-runs; orphan structurally impossible (pairing guard) |
-| time-window dependency protection + adaptive preserve-recent (3.3) | regression clean |
-
-cacheRead value of eviction (deterministic API replay across sessions): **≈ −21…−25%**,
-strategy-independent; batch merging adds a small consistent edge. Detailed reports live
-in the helmsman repo (`benchmarks/REPORT-cache-opt.md`, `REPORT-verify-segmentation-strip.md`).
+Live capability benchmarks (helmsman platform): **[BENCHMARKS.md](./BENCHMARKS.md)** —
+the fixed test plan (scenario A: 12-round long conversation; scenario B: single-request
+long autonomous task ×3) with per-version data rows, refreshed after every behavioral change.
 
 Offline regression tools (run on your own local sessions — no data leaves your machine):
 `tools/cache-replay.mjs` (deterministic cacheRead), `tools/replay-real.mjs --apply` (engine
