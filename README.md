@@ -111,20 +111,25 @@ Observability:
 ## Verification
 
 ```bash
-node check.js          # pure-function unit checks
+node check.js          # pure-function unit checks (episode inference, eviction policy, strip, pairing)
 ```
 
-Long-session pressure test (12 rounds of dialogue, ~200K cacheRead tokens):
-`baseline vs CWL` — see `benchmarks/` in the source repo for scripts and reports.
+**0.2.x — long-horizon eviction (verified on the helmsman platform, task-1)**
 
-| metric | baseline | CWL | Δ |
-|--------|----------|-----|---|
-| steps | 30 | 26 | −13% |
-| inputTokens | 28,478 | 10,343 | **−64%** |
-| cacheReadTokens | 200,576 | 178,432 | −11% |
-| outputTokens | 2,809 | 2,107 | −25% |
+| work | outcome |
+|------|---------|
+| bounded segmentation (single-request long runs no longer collapse into one giant episode) | live scenario B ×3: 3/3 Done |
+| fine-grained graduated eviction (content stubbing before whole-episode eviction) | strip→evict two-phase works end-to-end |
+| three task-level bugs found in live verification (seq-endpoint window drift → shadowed mismatch → orphan tool messages), root-fixed by **positional-block eviction** | all zero in re-runs; orphan structurally impossible (pairing guard) |
+| time-window dependency protection + adaptive preserve-recent (3.3) | regression clean |
 
-All 12 rounds completed correctly; eviction did not degrade task quality.
+cacheRead value of eviction (deterministic API replay across sessions): **≈ −21…−25%**,
+strategy-independent; batch merging adds a small consistent edge. Detailed reports live
+in the helmsman repo (`benchmarks/REPORT-cache-opt.md`, `REPORT-verify-segmentation-strip.md`).
+
+Offline regression tools (run on your own local sessions — no data leaves your machine):
+`tools/cache-replay.mjs` (deterministic cacheRead), `tools/replay-real.mjs --apply` (engine
+apply-layer with real surface fold + tool-pairing assertion), `tools/eval-episodes.mjs`.
 
 ## License
 

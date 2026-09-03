@@ -88,19 +88,24 @@ node tools/analyze-session.mjs <session.jsonl>
 ## 验证
 
 ```bash
-node check.js          # 纯函数单元检查
+node check.js          # 纯函数单元检查(episode 推断/驱逐策略/裁剪/配对)
 ```
 
-长会话压力测试(12 轮对话,约 20 万 cacheRead tokens):`baseline vs CWL`——见源码仓库 `benchmarks/` 下的脚本与报告。
+**0.2.x 长时任务驱逐(helmsman 平台验证,任务一)**
 
-| 指标 | baseline | CWL | Δ |
-|--------|----------|-----|---|
-| steps | 30 | 26 | −13% |
-| inputTokens | 28,478 | 10,343 | **−64%** |
-| cacheReadTokens | 200,576 | 178,432 | −11% |
-| outputTokens | 2,809 | 2,107 | −25% |
+| 工作 | 结果 |
+|------|------|
+| 有界分段(单请求长跑不再塌缩成巨型段) | 场景 B live ×3:3/3 Done |
+| 细粒度分级驱逐(整段驱逐前先内容裁剪) | 裁剪→整段驱逐两阶段端到端走通 |
+| live 验证发现三个任务级 bug(seq 端点窗口漂移 → shadowed 不一致 → 孤儿 tool 消息),**位置块驱逐根治** | 复跑全部清零;孤儿结构性不可能(配对守卫) |
+| 时间窗依赖保护 + 自适应最新边界(3.3) | 回归干净 |
 
-12 轮全部正确完成;驱逐未降低任务质量。
+驱逐的 cacheRead 价值(跨会话确定性 API 重放):**≈ −21~−25%**,策略无关;batch 合并有小的稳定增益。
+详细报告在 helmsman 仓库(`benchmarks/REPORT-cache-opt.md`、`REPORT-verify-segmentation-strip.md`)。
+
+离线回归工具(用你自己的本地会话运行,数据不出机器):
+`tools/cache-replay.mjs`(确定性 cacheRead)、`tools/replay-real.mjs --apply`(真实 surface fold +
+工具配对断言的引擎 apply 层回归)、`tools/eval-episodes.mjs`。
 
 ## License
 
