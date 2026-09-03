@@ -164,8 +164,13 @@ export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
   const { order = 'oldest', tailWindow = 0, exclude = null } = opts
   const episodes = deriveEpisodes(events, { surface })
   const surfaceSet = new Set(surface)
-  const depended = new Set()
-  for (const ep of episodes) if (ep.type === 'act') for (const d of ep.deps ?? []) depended.add(d)
+  // 有效依赖(3.3 时间窗保护)：只统计"引用 act 仍在 surface 中"的 expl。
+  // expl 保护到引用它的 act 全部被驱逐为止；act 已驱逐 → expl 无保护意义，解锁。
+  const dependedActive = new Set()
+  for (const ep of episodes) {
+    if (ep.type !== 'act' || !surfaceSet.has(ep.startSeq)) continue
+    for (const d of ep.deps ?? []) dependedActive.add(d)
+  }
   // surface 在 replace 后不再按 seq 有序（marker 的新 seq 被 splice 进中间），
   // 边界/tailFloor 一律按排序后的节点取（位置取值会落到任意低 seq 节点上，
   // 把候选全部过滤掉 → 零驱逐）。
@@ -179,16 +184,31 @@ export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
     if (exclude && exclude.has(ep.startSeq)) continue
     if (!surfaceSet.has(ep.startSeq)) continue
     if (ep.endSeq > newestAllowed) continue
-    if (ep.type === 'expl' && depended.has(ep.name)) continue
     if (tailFloor >= 0 && ep.endSeq < tailFloor) continue
-    // 分数越低越优先：expl(0) < act(10)；order=tail 时 endSeq 越大越优先
+    // 分数越低越优先：expl(0) < act(10) < 被有效依赖的 expl(20)
+    // （被依赖 expl 晚于引用它的 act 驱逐；act 驱逐后其 expl 自动降到 0 档）
+    let base = ep.type === 'expl' ? 0 : 10
+    if (ep.type === 'expl' && dependedActive.has(ep.name)) base = 20
     const score = order === 'tail'
-      ? (ep.type === 'expl' ? 0 : 10) - ep.endSeq / 1e9
-      : (ep.type === 'expl' ? 0 : 10) + ep.startSeq / 1e9
+      ? base - ep.endSeq / 1e9
+      : base + ep.startSeq / 1e9
     if (best === null || score < best.score) best = { ...ep, score }
   }
   if (!best) return null
   return { start: best.startSeq, end: best.endSeq, label: best.name, type: best.type, readPaths: best.readPaths ?? [] }
+}
+
+/**
+ * 最新可驱逐边界(3.3 PRESERVE_RECENT 自适应)：保护"正在进行的工具调用链"——
+ * 即 surface 中最后一个未完成(仍在增长)的段，其之前的位置为可驱逐边界。
+ * @returns 边界 seq(<= 它的已完成段可驱逐)；无活动段时返回 surface 末节点。
+ */
+export function newestEvictableBoundary(surface, episodes) {
+  if (!surface.length) return -1
+  const active = [...episodes].reverse().find((e) => !e.completed)
+  if (!active || active.posStart == null) return surface[surface.length - 1]
+  if (active.posStart <= 0) return -1
+  return surface[active.posStart - 1] ?? -1
 }
 
 /**

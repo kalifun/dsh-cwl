@@ -20,7 +20,7 @@
 // HTTP：/api/cwl/evictions（驱逐记录）、/api/cwl/force（调试：强制驱逐一次）
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { deriveEpisodes, episodeBlock, largeResultSeqs, mergeBlocksByPos, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData, toolResultText } from './lib.js'
+import { deriveEpisodes, episodeBlock, largeResultSeqs, mergeBlocksByPos, newestEvictableBoundary, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData, toolResultText } from './lib.js'
 
 export const name = 'dsh-cwl'
 export const inject = ['webServer', 'agents', 'tokenMeter', 'compaction', 'tools']
@@ -174,11 +174,11 @@ export function apply(ctx) {
     if (used <= budget) return next() // 预算内零干预
 
     try {
-      const PRESERVE_RECENT = 2
       const surface = session.surface?.nodes ?? []
-      // surface 在 replace 后无序（marker 的新 seq 插入中间），边界必须按排序取
-      const sorted = [...surface].sort((a, b) => a - b)
-      const newestAllowed = sorted.length > PRESERVE_RECENT ? sorted[sorted.length - 1 - PRESERVE_RECENT] : -1
+      // 自适应最新边界(3.3)：保护正在进行的工具调用链(最后一个未完成段)，
+      // 而非固定 2 节点；其之前的位置为可驱逐边界
+      const epsNow = deriveEpisodes(session.events, { surface })
+      const newestAllowed = newestEvictableBoundary(surface, epsNow)
       const { toEvict, toStrip } = collectTargets(session, surface, newestAllowed)
       let strippedCount = 0
       for (const s of toStrip) for (const seq of s.seqs) if (stripResult(session, seq)) strippedCount++
@@ -252,8 +252,7 @@ export function apply(ctx) {
             }
             const surface = session.surface?.nodes ?? []
             const episodes = deriveEpisodes(session.events, { surface })
-            const sorted = [...surface].sort((a, b) => a - b)
-            const newestAllowed = sorted.length > 2 ? sorted[sorted.length - 3] : -1
+            const newestAllowed = newestEvictableBoundary(surface, episodes)
             const target = pickEvictionTarget(session.events, surface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow })
             if (!target) {
               res.writeHead(200, { 'content-type': 'application/json' })

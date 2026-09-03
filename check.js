@@ -1,6 +1,6 @@
 // dsh-cwl 纯函数单元测试：node check.js
 import assert from 'node:assert/strict'
-import { deriveEpisodes, episodeBlock, largeResultSeqs, mergeBlocksByPos, mergeRanges, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData } from './lib.js'
+import { deriveEpisodes, episodeBlock, largeResultSeqs, mergeBlocksByPos, mergeRanges, newestEvictableBoundary, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData } from './lib.js'
 
 // --- deriveEpisodes：阶段合并 + 依赖推断 ---
 const events = [
@@ -229,5 +229,21 @@ const mb = mergeBlocksByPos([
 assert.equal(mb.length, 2, 'position-adjacent merged, gapped stays separate')
 assert.deepEqual(mb[0], { posStart: 1, posEnd: 4, labels: ['expl-1', 'act-1'] }, 'merged block 1-4')
 assert.deepEqual(mb[1], { posStart: 7, posEnd: 8, labels: ['act-2'] }, 'separate block 7-8')
+
+// --- 3.3: 依赖时间窗 + 自适应边界 ---
+// expl-1 被 act-1 引用; act-1 驱逐(不在 surface)后 expl-1 解锁
+const tDep1 = pickEvictionTarget(events, surface, 106) // act-1 在 surface, expl-1 有效依赖
+assert.notEqual(tDep1?.label, 'expl-1', 'expl-1 protected while its act is in surface')
+// act-1 已驱逐(surface 不含 105,106): expl-1 解锁可驱逐
+const surfaceNoAct = [100, 101, 102, 103, 104, 107, 108]
+const tDep2 = pickEvictionTarget(events, surfaceNoAct, 108)
+assert.equal(tDep2?.label, 'expl-1', 'expl-1 evictable once its referencing act left the surface')
+// 自适应边界: 无活动段 → 末节点; 有活动段 → 活动段之前
+const eb1 = newestEvictableBoundary([100, 101, 102, 103], [{ completed: true, posStart: 0, posEnd: 2 }, { completed: false, posStart: 3, posEnd: 3 }])
+assert.equal(eb1, 102, 'boundary before active segment (pos 3) = node at pos 2')
+const eb2 = newestEvictableBoundary([100, 101, 102], [{ completed: true, posStart: 0, posEnd: 2 }])
+assert.equal(eb2, 102, 'no active segment -> last node')
+const eb3 = newestEvictableBoundary([100], [{ completed: false, posStart: 0, posEnd: 0 }])
+assert.equal(eb3, -1, 'only active segment -> nothing evictable')
 
 console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限 / resultSeqs / largeResultSeqs / stub同构 / exclude')
