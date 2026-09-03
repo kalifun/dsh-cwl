@@ -1,6 +1,6 @@
 // dsh-cwl 纯函数单元测试：node check.js
 import assert from 'node:assert/strict'
-import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, stubToolResultData } from './lib.js'
+import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, shadowedNodes, stubToolResultData } from './lib.js'
 
 // --- deriveEpisodes：阶段合并 + 依赖推断 ---
 const events = [
@@ -171,5 +171,17 @@ assert.ok(new Set(surface7).has(pick7.start) && new Set(surface7).has(pick7.end)
 // 无 surface 的纯事件语义:702 作为普通 tool/result 也在事件流中,同样被计入
 const eps7b = deriveEpisodes(events7)
 assert.deepEqual(eps7b.find((e) => e.type === 'expl').resultSeqs, [701, 702], 'pure event analysis sees both results')
+
+// --- shadowedNodes: 位置切片(无序 surface 含 stub 也完整覆盖) ---
+// 模拟: [0, 1, 5, 3, 4] = user, assistant(read), stub(替换了大 result), assistant(bash), result
+const sn = shadowedNodes([0, 1, 5, 3, 4], 1, 3)
+assert.deepEqual(sn, [1, 5, 3], 'positional slice must include the in-between stub node 5')
+// seq 范围过滤会漏 5(5 > end=3),位置切片不漏 —— 这正是 live bug 的修复
+const sn2 = shadowedNodes([0, 1, 5, 3, 4], 1, 1)
+assert.deepEqual(sn2, [1], 'single-node range')
+const sn3 = shadowedNodes([0, 6, 3, 4], 3, 4)
+assert.deepEqual(sn3, [3, 4], 'clean range after eviction')
+const sn4 = shadowedNodes([100, 200], 999, 1000)
+assert.deepEqual(sn4, [], 'endpoints not in surface -> empty (caller falls back)')
 
 console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限 / resultSeqs / largeResultSeqs / stub同构 / exclude')

@@ -20,7 +20,7 @@
 // HTTP：/api/cwl/evictions（驱逐记录）、/api/cwl/force（调试：强制驱逐一次）
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, stubToolResultData, toolResultText } from './lib.js'
+import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, shadowedNodes, stubToolResultData, toolResultText } from './lib.js'
 
 export const name = 'dsh-cwl'
 export const inject = ['webServer', 'agents', 'tokenMeter', 'compaction', 'tools']
@@ -68,7 +68,8 @@ export function apply(ctx) {
       ? `已探索：${episode.toolNames.join(', ')}${episode.readPaths?.length ? `（${episode.readPaths.slice(0, 3).join(', ')}）` : ''}`
       : `已执行动作段 ${episode.name}（效果已落盘，如需细节用 cwl_recall）`
     const marker = `[cwl-evicted:${episode.name} type=${episode.type}] ${summary}`
-    const shadowed = (session.surface?.nodes ?? []).filter((seq) => seq >= start && seq <= end)
+    // 位置切片(与引擎 fold 的 replacementRange 一致)：含区间内替换进来的 stub 节点
+    const shadowed = shadowedNodes(session.surface?.nodes ?? [], start, end)
     const ev = session.append('user/message', {
       role: 'user',
       content: [{ type: 'text', text: marker }],
@@ -236,8 +237,8 @@ export function apply(ctx) {
               res.writeHead(404, { 'content-type': 'application/json' })
               return res.end(JSON.stringify({ error: 'session not live' }))
             }
-            const episodes = deriveEpisodes(session.events, { surface })
             const surface = session.surface?.nodes ?? []
+            const episodes = deriveEpisodes(session.events, { surface })
             const sorted = [...surface].sort((a, b) => a - b)
             const newestAllowed = sorted.length > 2 ? sorted[sorted.length - 3] : -1
             const target = pickEvictionTarget(session.events, surface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow })

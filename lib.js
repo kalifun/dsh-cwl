@@ -234,6 +234,19 @@ export function stubToolResultData(originalEvent, stubText) {
   }
 }
 
+/**
+ * 计算 surface replace [start,end] 实际遮蔽的节点(与引擎 surface fold 的
+ * replacementRange 语义一致：按位置 indexOf 切片，而非 seq 范围过滤)。
+ * 驱逐/裁剪后 surface 不再按 seq 有序(stub/marker 的新 seq 插入中间)，
+ * seq 范围过滤会漏掉区间内替换进来的 stub → sourceEventSeqs 校验失败。
+ */
+export function shadowedNodes(surface, start, end) {
+  const si = surface.indexOf(start)
+  const ei = surface.indexOf(end)
+  if (si >= 0 && ei >= 0 && si <= ei) return surface.slice(si, ei + 1)
+  return []
+}
+
 /** 合并相邻/重叠区间（E2 批处理：多个 episode 合并为一次 surface replace，
  * 减少对前缀缓存的打断次数）。纯函数，可独立测试。
  */
