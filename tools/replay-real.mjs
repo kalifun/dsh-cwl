@@ -186,6 +186,8 @@ for (const ev of events) {
   }
 
   // ---- apply 层回归：镜像引擎 collectTargets + 执行 + 真实 foldSurface 校验 ----
+  // 模拟在隔离副本 work 上进行(append 会推进 log.length，不能污染外层真实事件流)
+  const work = [...log]
   // 基础日志自身必须先通过真实 fold(历史会话可能含旧 bug 产物)
   if (!applyReady) {
     var applyReady = false
@@ -198,7 +200,6 @@ for (const ev of events) {
     }
   }
   const foldSurface = globalThis.__fold
-  let applySeq = events.length
   const stripped = new Set()
   const applyErr = {}
   const applyErrDetail = []
@@ -208,18 +209,18 @@ for (const ev of events) {
   const toEvict = []
   const toStrip = []
   const excluded = new Set()
-  const surfaceSnap = [...foldSurface(log).nodes]
-  const episodes = deriveEpisodes(log, { surface: surfaceSnap })
+  const surfaceSnap = [...foldSurface(work).nodes]
+  const episodes = deriveEpisodes(work, { surface: surfaceSnap })
   const byStart = new Map(episodes.map((e) => [e.startSeq, e]))
   for (let g = 0; g < 20; g++) {
-    if (usageTokens(log) <= BUDGET) break
+    if (usageTokens(work) <= BUDGET) break
     const occupied = [...toEvict, ...toStrip]
     const liveS = surfaceSnap.filter((s) => !occupied.some((p) => s >= p.start && s <= p.end))
-    const t = pickEvictionTarget(log, liveS, boundary, { order: ORDER, exclude: excluded })
+    const t = pickEvictionTarget(work, liveS, boundary, { order: ORDER, exclude: excluded })
     if (!t) break
     const ep = byStart.get(t.start)
     if (ep?.type === 'expl' && DO_STRIP) {
-      const todo = largeResultSeqs(log, ep, liveS, STRIP_THRESHOLD).filter((x) => !stripped.has(x.seq))
+      const todo = largeResultSeqs(work, ep, liveS, STRIP_THRESHOLD).filter((x) => !stripped.has(x.seq))
       if (todo.length) {
         toStrip.push({ start: t.start, end: t.end, seqs: todo.map((x) => x.seq) })
         excluded.add(t.start)
@@ -229,23 +230,55 @@ for (const ev of events) {
     toEvict.push(t)
   }
   // 执行：先 strip 后 evict(镜像引擎)
+  // 工具配对断言：每个 in-surface tool/result 的 toolCallId 必须存在对应的
+  // in-surface assistant tool-call(LLM API 以 400 强制此不变量；孤儿消息是
+  // fold 发现不了的任务级失败——整段驱逐位置性漏节点所致)。
+  const pairingCheck = () => {
+    const nodes = foldSurface(work).nodes
+    const bySeq = new Map(work.map((e) => [e.seq, e]))
+    const callIds = new Set()
+    for (const seq of nodes) {
+      const ev = bySeq.get(seq)
+      if (ev?.type !== 'assistant/message') continue
+      for (const b of ev.data?.message?.content ?? []) if (b?.type === 'tool-call' && b.id) callIds.add(b.id)
+    }
+    const orphans = []
+    for (const seq of nodes) {
+      const ev = bySeq.get(seq)
+      if (ev?.type !== 'tool/result') continue
+      const id = ev.data?.message?.content?.[0]?.toolCallId
+      if (id && !callIds.has(id)) orphans.push({ seq, id })
+    }
+    if (orphans.length) {
+      applyErr['orphan-tool'] = (applyErr['orphan-tool'] ?? 0) + orphans.length
+      if (applyErrDetail.length < 5) applyErrDetail.push({ preStep, what: 'evict', kind: 'orphan-tool', msg: `孤儿 tool/result seq=${orphans[0].seq} id=${orphans[0].id}(共${orphans.length})` })
+      return false
+    }
+    return true
+  }
   const applyOne = (evt, what) => {
-    log.push(evt)
-    try { foldSurface(log); actLog[what]++; return true }
-    catch (e) {
-      log.pop() // 校验失败=引擎 append 拒绝,事件未提交 → 回滚
+    work.push(evt)
+    try { foldSurface(work) } catch (e) {
+      work.pop() // 校验失败=引擎 append 拒绝,事件未提交 → 回滚
       const kind = classifyApplyError(e)
       applyErr[kind] = (applyErr[kind] ?? 0) + 1
       actLog.applyFail++
       if (applyErrDetail.length < 5) applyErrDetail.push({ preStep, what, kind, msg: (e?.message ?? '').slice(0, 140) })
       return false
     }
+    if (what === 'evict' && !pairingCheck()) {
+      work.pop() // 配对被破坏(孤儿 tool/result)→ 回滚,防止 LLM 400 级失败
+      actLog.applyFail++
+      return false
+    }
+    actLog[what]++
+    return true
   }
   for (const s of toStrip) {
     for (const seq of s.seqs) {
-      const orig = log.find((e) => e.seq === seq && e.type === 'tool/result')
+      const orig = work.find((e) => e.seq === seq && e.type === 'tool/result')
       if (!orig) continue
-      const evt = { type: 'tool/result', seq: applySeq++, time: Date.now(), surfaceOp: { op: 'replace', start: seq, end: seq }, sourceEventSeqs: [seq], data: stubToolResultData(orig, '[cwl-stub]') }
+      const evt = { type: 'tool/result', seq: work.length, time: Date.now(), surfaceOp: { op: 'replace', start: seq, end: seq }, sourceEventSeqs: [seq], data: stubToolResultData(orig, '[cwl-stub]') }
       if (!applyOne(evt, 'strip')) break
       stripped.add(seq)
     }
@@ -255,8 +288,8 @@ for (const ev of events) {
     : toEvict.map((t) => ({ start: t.start, end: t.end, labels: [t.label] }))
   for (const r of evictRanges) {
     if (actLog.applyFail > 0) break // 引擎失败即中止本 pre-step 后续动作
-    const shadowed = shadowedNodes([...foldSurface(log).nodes], r.start, r.end)
-    const evt = { type: 'user/message', seq: applySeq++, time: Date.now(), data: { role: 'user', content: [{ type: 'text', text: `[cwl-evicted:${r.labels.join('+')}]` }] }, surfaceOp: { op: 'replace', start: r.start, end: r.end }, sourceEventSeqs: shadowed.length ? shadowed : [r.start] }
+    const shadowed = shadowedNodes([...foldSurface(work).nodes], r.start, r.end)
+    const evt = { type: 'user/message', seq: work.length, time: Date.now(), data: { role: 'user', content: [{ type: 'text', text: `[cwl-evicted:${r.labels.join('+')}]` }] }, surfaceOp: { op: 'replace', start: r.start, end: r.end }, sourceEventSeqs: shadowed.length ? shadowed : [r.start] }
     applyOne(evt, 'evict')
   }
   picksTotal += toEvict.length

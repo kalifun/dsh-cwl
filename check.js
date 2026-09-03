@@ -1,6 +1,6 @@
 // dsh-cwl 纯函数单元测试：node check.js
 import assert from 'node:assert/strict'
-import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, shadowedNodes, stubToolResultData } from './lib.js'
+import { deriveEpisodes, largeResultSeqs, mergeRanges, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData } from './lib.js'
 
 // --- deriveEpisodes：阶段合并 + 依赖推断 ---
 const events = [
@@ -183,5 +183,21 @@ const sn3 = shadowedNodes([0, 6, 3, 4], 3, 4)
 assert.deepEqual(sn3, [3, 4], 'clean range after eviction')
 const sn4 = shadowedNodes([100, 200], 999, 1000)
 assert.deepEqual(sn4, [], 'endpoints not in surface -> empty (caller falls back)')
+
+// --- pairingBreaks: 驱逐窗口切开 tool-call/result 对 → 孤儿检测 ---
+const mkCall = (seq, id) => ({ type: 'assistant/message', seq, data: { message: { content: [{ type: 'tool-call', id, name: 'bash', arguments: '{}' }] } } })
+const mkRes = (seq, id) => ({ type: 'tool/result', seq, data: { message: { content: [{ type: 'tool-result', toolCallId: id, content: [{ type: 'text', text: 'ok' }] }] } } })
+// 配对完整: call+result 都在窗口内 → 无破坏
+const ev8a = [mkCall(10, 'c1'), mkRes(11, 'c1')]
+assert.deepEqual(pairingBreaks(ev8a, [10, 11], 10, 11), [], 'complete pair in window -> no break')
+// 窗口只覆盖 call c1(10),result c1 在窗口外(12) → 孤儿 → 必须检出
+const ev8b = [mkCall(10, 'c1'), mkRes(12, 'c1')]
+const breaks8 = pairingBreaks(ev8b, [10, 12], 10, 10)
+assert.equal(breaks8.length, 1, 'call in window with result outside must be flagged')
+assert.equal(breaks8[0].callId, 'c1', 'flagged pair id')
+// 反向: result 在窗口内(10)但 call 在窗口外(9) → 孤儿 call 缺 result
+const ev8c = [mkCall(9, 'c9'), mkRes(10, 'c9')]
+const breaks8b = pairingBreaks(ev8c, [9, 10], 10, 10)
+assert.equal(breaks8b.length, 1, 'result in window with call outside must be flagged')
 
 console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限 / resultSeqs / largeResultSeqs / stub同构 / exclude')

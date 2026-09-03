@@ -235,6 +235,64 @@ export function stubToolResultData(originalEvent, stubText) {
 }
 
 /**
+ * 配对完整性校验：驱逐窗口 [start,end] 的位置切片是否会切开 tool-call/result 配对。
+ * 若窗口内含某 tool-call 但它的某个 result 在窗口外(或反之)，驱逐后 surface 将出现
+ * 孤儿消息 → LLM API 400(任务级失败，fold 校验发现不了)。返回被切开的配对描述。
+ * @returns [{callId, seq, side}] 破坏配对的节点；空数组 = 窗口配对完整可驱逐
+ */
+export function pairingBreaks(events, surface, start, end) {
+  const win = shadowedNodes(surface, start, end)
+  if (!win.length) return []
+  const winSet = new Set(win)
+  const bySeq = new Map(events.filter((e) => e.type === 'assistant/message' || e.type === 'tool/result').map((e) => [e.seq, e]))
+  // 窗口内 call id → 窗口外它的 result；窗口内 result id → 窗口外它的 call
+  const breaks = []
+  const callInWin = new Map() // id -> seq
+  const resultInWin = new Map() // id -> seq
+  for (const s of win) {
+    const ev = bySeq.get(s)
+    if (!ev) continue
+    if (ev.type === 'assistant/message') {
+      for (const b of ev.data?.message?.content ?? []) {
+        if (b?.type === 'tool-call' && b.id) callInWin.set(b.id, s)
+        // 并行批次: call 的 result 在窗口外 → 破坏
+      }
+    } else if (ev.type === 'tool/result') {
+      const id = ev.data?.message?.content?.[0]?.toolCallId
+      if (id) resultInWin.set(id, s)
+    }
+  }
+  // 窗口外的 result/call 是否引用了窗口内的 id
+  for (const [id, seq] of callInWin) {
+    // 找该 call 的所有 result 是否都在窗口内(通过扫描全 surface 对应 id)
+  }
+  // 简化但可靠: 扫描全 surface,统计每对 id 的 call/result 是否同侧
+  const allIds = new Map() // id -> {calls: [seq], results: [seq]}
+  for (const s of surface) {
+    const ev = bySeq.get(s)
+    if (!ev) continue
+    if (ev.type === 'assistant/message') {
+      for (const b of ev.data?.message?.content ?? []) if (b?.type === 'tool-call' && b.id) {
+        const rec = allIds.get(b.id) ?? { calls: [], results: [] }
+        rec.calls.push(s); allIds.set(b.id, rec)
+      }
+    } else if (ev.type === 'tool/result') {
+      const id = ev.data?.message?.content?.[0]?.toolCallId
+      if (id) { const rec = allIds.get(id) ?? { calls: [], results: [] }; rec.results.push(s); allIds.set(id, rec) }
+    }
+  }
+  for (const [id, rec] of allIds) {
+    if (!rec.calls.length || !rec.results.length) continue
+    const callIn = rec.calls.some((s) => winSet.has(s))
+    const callOut = rec.calls.some((s) => !winSet.has(s))
+    const resIn = rec.results.some((s) => winSet.has(s))
+    const resOut = rec.results.some((s) => !winSet.has(s))
+    if ((callIn && resOut) || (resIn && callOut)) breaks.push({ callId: id, calls: rec.calls, results: rec.results })
+  }
+  return breaks
+}
+
+/**
  * 计算 surface replace [start,end] 实际遮蔽的节点(与引擎 surface fold 的
  * replacementRange 语义一致：按位置 indexOf 切片，而非 seq 范围过滤)。
  * 驱逐/裁剪后 surface 不再按 seq 有序(stub/marker 的新 seq 插入中间)，

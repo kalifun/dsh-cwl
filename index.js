@@ -20,7 +20,7 @@
 // HTTP：/api/cwl/evictions（驱逐记录）、/api/cwl/force（调试：强制驱逐一次）
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, shadowedNodes, stubToolResultData, toolResultText } from './lib.js'
+import { deriveEpisodes, largeResultSeqs, mergeRanges, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData, toolResultText } from './lib.js'
 
 export const name = 'dsh-cwl'
 export const inject = ['webServer', 'agents', 'tokenMeter', 'compaction', 'tools']
@@ -69,7 +69,18 @@ export function apply(ctx) {
       : `已执行动作段 ${episode.name}（效果已落盘，如需细节用 cwl_recall）`
     const marker = `[cwl-evicted:${episode.name} type=${episode.type}] ${summary}`
     // 位置切片(与引擎 fold 的 replacementRange 一致)：含区间内替换进来的 stub 节点
-    const shadowed = shadowedNodes(session.surface?.nodes ?? [], start, end)
+    const nodes = session.surface?.nodes ?? []
+    const shadowed = shadowedNodes(nodes, start, end)
+    // 配对完整性防御：窗口若切开 tool-call/result 对(驱逐后产生孤儿消息 → LLM 400)，
+    // 跳过本次驱逐(结构性安全；fold 校验发现不了这种失败)。
+    const breaks = pairingBreaks(session.events, nodes, start, end)
+    if (breaks.length > 0) {
+      const list = evictionLog.get(session.id) ?? []
+      list.push({ episode: episode.name, kind: 'skipped-pairing', start, end, broke: breaks[0].callId, at: Date.now() })
+      evictionLog.set(session.id, list)
+      console.warn(`[dsh-cwl] 跳过驱逐 ${episode.name}（配对破坏 ${breaks.length} 对，首 id ${breaks[0].callId.slice(0, 20)}…）`)
+      return null
+    }
     const ev = session.append('user/message', {
       role: 'user',
       content: [{ type: 'text', text: marker }],
