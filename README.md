@@ -35,12 +35,17 @@ episodes whose effects are already persisted. **User messages are never evicted.
 2. **Pressure metering**: real context pressure = input + cacheRead + output + reasoning tokens
    (accumulated from `assistant/message` usage events — `tokenMeter.measure().totalTokens` omits
    cacheRead, which dominates long sessions).
-3. **Graduated eviction** on the `agent/pre-step` waterfall (before every LLM call):
-   - evict unexplored-dependent `expl` episodes first (keeping a one-line "explored: …" marker)
-   - then oldest completed `act` episodes
+3. **Graduated eviction** on the `agent/pre-step` waterfall (before every LLM call), from
+   fine to coarse:
+   - **content stubbing (fine)**: large tool-result contents in `expl` episodes are rewritten
+     to a short stub first (`[cwl-stub: …]`) — structure kept, tokens cut, tool pairing intact
+   - **whole-episode eviction (coarse)**: `expl` episodes first (pure context, one-line
+     "explored: …" marker), then completed `act` episodes; executed as **positional blocks**
+     in the surface (positions are the invariant that survives replaces — an eviction never
+     splits a tool-call/result pair into orphans)
    - never touch the newest tail (preserve-recent) or user messages
-   - evicted ranges are replaced with a lightweight marker via the official surface-replace seam
-     (original events stay in the log; `cwl_recall` can restore file paths).
+   - evicted ranges are replaced with a lightweight marker via the official surface-replace
+     seam (original events stay in the log; `cwl_recall` can restore file paths)
 
 ## Install
 

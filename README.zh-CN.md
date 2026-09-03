@@ -22,9 +22,9 @@ CWL 把对话记录当作**结构化的工作记录**,做确定性驱逐:智能�
 
 1. **Episode 推导(自动,无需智能体标注)**:连续的同类工具批次合并为语义段(`expl` 表示纯读/搜索类,含只读 bash(如 grep/cat);`act` 表示有副作用类:edit/write/写型 bash);每条用户消息关闭当前段(轮次边界),且每段有**批次上限**——单请求的连续自主长跑(几十次工具调用)也会分成多个有界、可驱逐的段,而不是塌缩成单个巨型段;某个 `act` 触碰的文件如果之前被某个 `expl` 读过,则建立依赖边。
 2. **压力计量**:真实上下文压力 = input + cacheRead + output + reasoning tokens(从 `assistant/message` usage 事件累计——`tokenMeter.measure().totalTokens` 不含 cacheRead,而 cacheRead 在长会话中占大头)。
-3. **分级驱逐**(挂在 `agent/pre-step` 瀑布上,每次 LLM 调用前):
-   - 先驱逐未被依赖的 `expl` 段(保留一行"已探索: …"标记)
-   - 再驱逐最旧的、已完成的 `act` 段
+3. **分级驱逐**(挂在 `agent/pre-step` 瀑布上,每次 LLM 调用前,由细到粗):
+   - **内容裁剪(细)**:`expl` 段内的大工具结果先改写为短标记(`[cwl-stub: …]`)——保留结构、削减 token、工具配对不受影响
+   - **整段驱逐(粗)**:先 `expl` 段(纯上下文,保留一行"已探索: …"标记),再最旧的已完成 `act` 段;一律按 **surface 位置块**执行(位置是 replace 后唯一可靠的不变量——驱逐永不切开 tool-call/result 对造成孤儿消息)
    - 永不触碰最新尾巴(preserve-recent)和用户消息
    - 被驱逐区间用轻量标记替换(官方 surface-replace 接口;原始事件保留在日志中,`cwl_recall` 可恢复文件路径)
 
