@@ -238,12 +238,19 @@ assert.notEqual(tDep1?.label, 'expl-1', 'expl-1 protected while its act is in su
 const surfaceNoAct = [100, 101, 102, 103, 104, 107, 108]
 const tDep2 = pickEvictionTarget(events, surfaceNoAct, 108)
 assert.equal(tDep2?.label, 'expl-1', 'expl-1 evictable once its referencing act left the surface')
-// 自适应边界: 无活动段 → 末节点; 有活动段 → 活动段之前
+// 自适应边界(3.3 修复): 保护 = 飞行段 + 其前 preserveRecent 个已完成节点(恢复硬保护,
+// 防止 agent 刚完成的一步立刻被驱逐 → 失去跨步记忆 → 死循环)
 const eb1 = newestEvictableBoundary([100, 101, 102, 103], [{ completed: true, posStart: 0, posEnd: 2 }, { completed: false, posStart: 3, posEnd: 3 }])
-assert.equal(eb1, 102, 'boundary before active segment (pos 3) = node at pos 2')
+assert.equal(eb1, 100, 'active at pos 3, preserve 2 -> protect pos 1-3, boundary at pos 0 (seq 100)')
 const eb2 = newestEvictableBoundary([100, 101, 102], [{ completed: true, posStart: 0, posEnd: 2 }])
-assert.equal(eb2, 102, 'no active segment -> last node')
+assert.equal(eb2, 100, 'no active segment -> protect last 2 nodes (101,102), boundary at 100')
 const eb3 = newestEvictableBoundary([100], [{ completed: false, posStart: 0, posEnd: 0 }])
 assert.equal(eb3, -1, 'only active segment -> nothing evictable')
+// 死循环回归: agent 刚完成一步(单批即关段,无飞行段), 该段必须受保护不被立即驱逐
+const eb4 = newestEvictableBoundary([300, 301, 302, 303], [
+  { completed: true, posStart: 0, posEnd: 1 },
+  { completed: true, posStart: 2, posEnd: 3 }, // 刚完成的一步(ls/cwl_recall)
+])
+assert.equal(eb4, 301, 'recently completed step (pos 2-3) protected; only older content (pos 0-1) evictable')
 
 console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限 / resultSeqs / largeResultSeqs / stub同构 / exclude')

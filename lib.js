@@ -203,12 +203,17 @@ export function pickEvictionTarget(events, surface, newestAllowed, opts = {}) {
  * 即 surface 中最后一个未完成(仍在增长)的段，其之前的位置为可驱逐边界。
  * @returns 边界 seq(<= 它的已完成段可驱逐)；无活动段时返回 surface 末节点。
  */
-export function newestEvictableBoundary(surface, episodes) {
+export function newestEvictableBoundary(surface, episodes, preserveRecent = 2) {
   if (!surface.length) return -1
   const active = [...episodes].reverse().find((e) => !e.completed)
-  if (!active || active.posStart == null) return surface[surface.length - 1]
-  if (active.posStart <= 0) return -1
-  return surface[active.posStart - 1] ?? -1
+  // 保护区 = surface 尾部:飞行中的工具链(自适应,多长都保护)+ 其前 preserveRecent 个
+  // 已完成节点(硬保护)。恢复 alpha.1 的 PRESERVE_RECENT=2 语义——只保护飞行段会让
+  // agent 刚完成的一步立刻被驱逐,失去跨步工作记忆(实测死循环:反复 ls/cwl_recall)。
+  const protectFrom = active && active.posStart != null
+    ? Math.max(0, active.posStart - preserveRecent)
+    : Math.max(0, surface.length - preserveRecent)
+  if (protectFrom <= 0) return -1
+  return surface[protectFrom - 1] ?? -1
 }
 
 /**
