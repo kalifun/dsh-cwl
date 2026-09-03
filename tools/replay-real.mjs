@@ -8,6 +8,13 @@
 //   --realistic [--batch]: 模拟真实引擎循环 —— 每次驱逐后追加 marker、重测压力、
 //     低于预算即停，统计"驱逐动作数"（--batch 时合并相邻段，对齐 E2 的 replace 次数），
 //     可与引擎实际驱逐动作数对比（回放预测 vs 引擎实际，差距主要来自预算停止与合并）。
+//   --apply: apply 层回归 —— 从干净事件流(丢弃历史 replace 产物)镜像引擎完整循环
+//     (决策 + strip 内容裁剪 + 整段驱逐)，每次 append 后用真实 @deepseek-ai/dsh-session
+//     foldSurface 校验(事件构造/端点/shadowed sourceEventSeqs 合法性)；
+//     校验失败按类型分类计数(end-not-found / shadowed-mismatch / provenance / ...)并回滚。
+//     能抓住纯决策层重放测不出的 apply 层 bug(如 strip 后整段驱逐端点丢失、
+//     shadowed 按 seq 过滤漏 stub 等历史缺陷)。需真实 surface 模块：
+//     自动探测 helmsman 仓库，或设 DSH_SESSION_SURFACE 指向 surface.js。
 //
 // 用法:
 //   node tools/replay-real.mjs <session.jsonl> [order=tail] [budget=30000] [sorted] [--realistic] [--batch]
@@ -15,7 +22,7 @@
 //     budget  压力阈值（tokens）
 //     sorted  用排序后的 newestAllowed（修复后算法；不传 = 旧算法对照）
 import { readFileSync } from 'node:fs'
-import { mergeRanges, pickEvictionTarget } from '../lib.js'
+import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, shadowedNodes, stubToolResultData } from '../lib.js'
 
 // 轻量 fold：与 surface.ts 的 applySurfacePlan 语义等价（append 推尾 / replace 原位替换）
 const SURFACE_TYPES = new Set(['user/message', 'assistant/message', 'tool/result'])
@@ -38,8 +45,11 @@ const file = process.argv[2]
 const ORDER = process.argv[3] ?? 'tail'
 const BUDGET = Number(process.argv[4] ?? 30000)
 const PRESERVE_RECENT = 2
-const REALISTIC = process.argv.includes('--realistic')
+const REALISTIC = process.argv.includes('--realistic') || process.argv.includes('--apply') // --apply 隐含 realistic 执行
 const BATCH = process.argv.includes('--batch')
+const APPLY = process.argv.includes('--apply')   // 真实 apply 层回归: 执行 + 真实 foldSurface 校验
+const DO_STRIP = !process.argv.includes('--no-strip')
+const STRIP_THRESHOLD = Number(process.argv.find((a, i) => process.argv[i - 1] === '--strip-threshold')) || 1500
 
 const raw = readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
 
@@ -59,7 +69,45 @@ for (const ev of raw) {
   }
   events.push(copy)
 }
-console.log(`surface events: ${events.length} | 真实驱逐 marker: ${events.filter((e) => JSON.stringify(e.data?.content ?? '').includes('cwl-evicted')).length}`)
+if (APPLY) {
+  // apply 回归从"干净事件流"开始：丢弃历史 replace 产物(旧版本插件的驱逐 marker/stub
+  // 自身可能不满足当前 fold 校验——那正是被测对象的历史 bug)，只保留 append 事件，
+  // 重基线为连续 seq；驱逐/裁剪由模拟的当前引擎逻辑从头执行并逐次校验。
+  const clean = events
+    .filter((e) => e.surfaceOp === undefined || e.surfaceOp === 'append')
+    .map((e, i) => ({ ...e, seq: i, sourceEventSeqs: undefined }))
+  events.length = 0
+  events.push(...clean)
+}
+console.log(`surface events: ${events.length} | 真实驱逐 marker: ${events.filter((e) => JSON.stringify(e.data?.content ?? '').includes('cwl-evicted')).length}${APPLY ? ' | [apply 模式: 已清理历史 replace 产物]' : ''}`)
+
+// 加载真实 @deepseek-ai/dsh-session 的 foldSurface(apply 校验用):
+// 顺序: 环境变量 DSH_SESSION_SURFACE → helmsman 仓库常见位置。找不到则 apply 模式退出。
+async function loadRealFold() {
+  const home = process.env.HOME ?? ''
+  const candidates = [
+    process.env.DSH_SESSION_SURFACE,
+    `${home}/Code/github/opensource/helmsman/dsh/node_modules/@deepseek-ai/dsh-session/lib/types/surface.js`,
+    `${home}/Code/github/opensource/helmsman/dsh/node_modules/.pnpm/@deepseek-ai+dsh-session@*/node_modules/@deepseek-ai/dsh-session/lib/types/surface.js`,
+  ].filter(Boolean)
+  for (const c of candidates) {
+    try { const m = await import(c); if (m.foldSurface) return m.foldSurface } catch { /* 下一个 */ }
+  }
+  try {
+    const m = await import('@deepseek-ai/dsh-session/surface')
+    if (m.foldSurface) return m.foldSurface
+  } catch { /* 未在可解析路径 */ }
+  return null
+}
+function classifyApplyError(e) {
+  const msg = e?.message ?? String(e)
+  if (/end seq .* not found in surface/.test(msg)) return 'end-not-found'
+  if (/sourceEventSeqs must include every shadowed/.test(msg)) return 'shadowed-mismatch'
+  if (/sourceEventSeqs must reference earlier events/.test(msg)) return 'provenance'
+  if (/not contiguous/.test(msg)) return 'contiguity'
+  if (/start seq .* not found in surface/.test(msg)) return 'start-not-found'
+  return 'other'
+}
 
 const log = []
 const usageTokens = (l) => {
@@ -109,37 +157,120 @@ for (const ev of events) {
     continue
   }
 
-  // 真实模拟：驱逐直到压力回落到预算内（每次驱逐后追加 marker 并重测）
-  const picks = []
-  let live = [...surface]
-  if (nextSeq === undefined) var nextSeq = events.length
+  if (!APPLY) {
+    // 真实模拟(无 apply 校验)：驱逐直到压力回落到预算内
+    const picks = []
+    let live = [...surface]
+    if (nextSeq === undefined) var nextSeq = events.length
+    for (let g = 0; g < 20; g++) {
+      if (usageTokens(log) <= BUDGET) break
+      const t = pickEvictionTarget(log, live, boundary, { order: ORDER })
+      if (!t) {
+        const epsRemain = deriveEpisodes(log).filter((e) => e.completed && live.includes(e.startSeq))
+        if (epsRemain.length > 0) { stalls++; if (stallDetail.length < 3) stallDetail.push({ preStep, remaining: epsRemain.map((e) => `${e.name}(end=${e.endSeq})`) }) }
+        else exhausted++
+        break
+      }
+      picks.push(t)
+      live = live.filter((s) => s < t.start || s > t.end)
+      log.push({
+        type: 'user/message', seq: nextSeq++,
+        data: { role: 'user', content: [{ type: 'text', text: `[cwl-evicted:${t.label} type=${t.type}]` }] },
+        surfaceOp: { op: 'replace', start: t.start, end: t.end },
+        sourceEventSeqs: surface.filter((s) => s >= t.start && s <= t.end),
+      })
+    }
+    picksTotal += picks.length
+    actionsTotal += BATCH ? mergeRanges(picks.map((p) => ({ start: p.start, end: p.end, label: p.label }))).length : picks.length
+    continue
+  }
+
+  // ---- apply 层回归：镜像引擎 collectTargets + 执行 + 真实 foldSurface 校验 ----
+  // 基础日志自身必须先通过真实 fold(历史会话可能含旧 bug 产物)
+  if (!applyReady) {
+    var applyReady = false
+    const foldSurface = await loadRealFold()
+    if (!foldSurface) { console.error('--apply 需要真实 @deepseek-ai/dsh-session surface(设 DSH_SESSION_SURFACE 或 helmsman 仓库)'); process.exit(1) }
+    applyReady = true
+    globalThis.__fold = foldSurface
+    try { foldSurface(log) } catch (e) {
+      console.error(`[apply] 基础日志自身不满足 fold 校验(${classifyApplyError(e)})，apply 回归跳过(旧 bug 产物会话)`); process.exit(0)
+    }
+  }
+  const foldSurface = globalThis.__fold
+  let applySeq = events.length
+  const stripped = new Set()
+  const applyErr = {}
+  const applyErrDetail = []
+  const actLog = { strip: 0, evict: 0, applyFail: 0 }
+
+  // 决策(与 index.js collectTargets 一致)：collect 完再统一执行
+  const toEvict = []
+  const toStrip = []
+  const excluded = new Set()
+  const surfaceSnap = [...foldSurface(log).nodes]
+  const episodes = deriveEpisodes(log, { surface: surfaceSnap })
+  const byStart = new Map(episodes.map((e) => [e.startSeq, e]))
   for (let g = 0; g < 20; g++) {
     if (usageTokens(log) <= BUDGET) break
-    const t = pickEvictionTarget(log, live, boundary, { order: ORDER })
-    if (!t) {
-      // 区分"真 stall"(有候选但被边界/依赖过滤)与"正常耗尽"(可驱逐段已全部驱逐)
-      const { deriveEpisodes } = await import('../lib.js')
-      const epsRemain = deriveEpisodes(log).filter((e) => e.completed && live.includes(e.startSeq))
-      if (epsRemain.length > 0) { stalls++; if (stallDetail.length < 3) stallDetail.push({ preStep, remaining: epsRemain.map((e) => `${e.name}(end=${e.endSeq})`) }) }
-      else exhausted++
-      break
+    const occupied = [...toEvict, ...toStrip]
+    const liveS = surfaceSnap.filter((s) => !occupied.some((p) => s >= p.start && s <= p.end))
+    const t = pickEvictionTarget(log, liveS, boundary, { order: ORDER, exclude: excluded })
+    if (!t) break
+    const ep = byStart.get(t.start)
+    if (ep?.type === 'expl' && DO_STRIP) {
+      const todo = largeResultSeqs(log, ep, liveS, STRIP_THRESHOLD).filter((x) => !stripped.has(x.seq))
+      if (todo.length) {
+        toStrip.push({ start: t.start, end: t.end, seqs: todo.map((x) => x.seq) })
+        excluded.add(t.start)
+        continue
+      }
     }
-    picks.push(t)
-    live = live.filter((s) => s < t.start || s > t.end)
-    // 追加模拟 marker（user/message + surface replace），与引擎 evictRange 一致
-    log.push({
-      type: 'user/message',
-      seq: nextSeq++, // 连续递增的新 seq（与真实引擎一致：append-only 单调 seq）
-      data: { role: 'user', content: [{ type: 'text', text: `[cwl-evicted:${t.label} type=${t.type}]` }] },
-      surfaceOp: { op: 'replace', start: t.start, end: t.end },
-      sourceEventSeqs: surface.filter((s) => s >= t.start && s <= t.end),
-    })
+    toEvict.push(t)
   }
-  picksTotal += picks.length
-  // 动作数：--batch 时合并相邻段（对齐 E2 的 replace 次数），否则逐段
-  actionsTotal += BATCH ? mergeRanges(picks.map((p) => ({ start: p.start, end: p.end, label: p.label }))).length : picks.length
+  // 执行：先 strip 后 evict(镜像引擎)
+  const applyOne = (evt, what) => {
+    log.push(evt)
+    try { foldSurface(log); actLog[what]++; return true }
+    catch (e) {
+      log.pop() // 校验失败=引擎 append 拒绝,事件未提交 → 回滚
+      const kind = classifyApplyError(e)
+      applyErr[kind] = (applyErr[kind] ?? 0) + 1
+      actLog.applyFail++
+      if (applyErrDetail.length < 5) applyErrDetail.push({ preStep, what, kind, msg: (e?.message ?? '').slice(0, 140) })
+      return false
+    }
+  }
+  for (const s of toStrip) {
+    for (const seq of s.seqs) {
+      const orig = log.find((e) => e.seq === seq && e.type === 'tool/result')
+      if (!orig) continue
+      const evt = { type: 'tool/result', seq: applySeq++, time: Date.now(), surfaceOp: { op: 'replace', start: seq, end: seq }, sourceEventSeqs: [seq], data: stubToolResultData(orig, '[cwl-stub]') }
+      if (!applyOne(evt, 'strip')) break
+      stripped.add(seq)
+    }
+  }
+  const evictRanges = BATCH
+    ? mergeRanges(toEvict.map((p) => ({ start: p.start, end: p.end, label: p.label }))).map((r) => ({ start: r.start, end: r.end, labels: r.labels }))
+    : toEvict.map((t) => ({ start: t.start, end: t.end, labels: [t.label] }))
+  for (const r of evictRanges) {
+    if (actLog.applyFail > 0) break // 引擎失败即中止本 pre-step 后续动作
+    const shadowed = shadowedNodes([...foldSurface(log).nodes], r.start, r.end)
+    const evt = { type: 'user/message', seq: applySeq++, time: Date.now(), data: { role: 'user', content: [{ type: 'text', text: `[cwl-evicted:${r.labels.join('+')}]` }] }, surfaceOp: { op: 'replace', start: r.start, end: r.end }, sourceEventSeqs: shadowed.length ? shadowed : [r.start] }
+    applyOne(evt, 'evict')
+  }
+  picksTotal += toEvict.length
+  actionsTotal += evictRanges.length
+  var applyStats = { strip: actLog.strip, evict: actLog.evict, err: applyErr, detail: applyErrDetail }
+  continue
+}
+// 汇总行在 apply 模式下追加
+if (typeof applyStats !== 'undefined' && applyStats) {
+  const errStr = Object.entries(applyStats.err).map(([k, v]) => `${k}:${v}`).join(' ') || '无'
+  console.log(`apply 层: strip=${applyStats.strip} evict=${applyStats.evict} | 校验失败: ${errStr}`)
+  for (const d of applyStats.detail) console.log(`  [apply-fail] pre-step#${d.preStep} ${d.what} ${d.kind}: ${d.msg}`)
 }
 
 console.log(`\n== order=${ORDER} ${REALISTIC ? 'realistic' + (BATCH ? '+batch' : '') : 'regression'} ==`)
-console.log(`总 pre-step: ${preStep} | 真 stall: ${stalls} 次 | 正常耗尽: ${exhausted} 次 | 总 picks: ${picksTotal}${REALISTIC ? ` | 驱逐动作数: ${actionsTotal}` : ''}`)
+console.log(`总 pre-step: ${preStep} | 真 stall: ${stalls} 次 | 正常耗尽: ${exhausted} 次 | 总 picks: ${picksTotal}${REALISTIC || APPLY ? ` | 驱逐动作数: ${actionsTotal}` : ''}`)
 if (stallDetail.length) console.log('stall 详情:', JSON.stringify(stallDetail, null, 1))
