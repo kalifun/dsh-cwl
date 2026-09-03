@@ -20,7 +20,7 @@
 // HTTP：/api/cwl/evictions（驱逐记录）、/api/cwl/force（调试：强制驱逐一次）
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { deriveEpisodes, largeResultSeqs, mergeRanges, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData, toolResultText } from './lib.js'
+import { deriveEpisodes, episodeBlock, largeResultSeqs, mergeBlocksByPos, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData, toolResultText } from './lib.js'
 
 export const name = 'dsh-cwl'
 export const inject = ['webServer', 'agents', 'tokenMeter', 'compaction', 'tools']
@@ -160,7 +160,7 @@ export function apply(ctx) {
           continue
         }
       }
-      toEvict.push(target)
+      toEvict.push({ ...target, posStart: ep?.posStart, posEnd: ep?.posEnd })
     }
     return { toEvict, toStrip }
   }
@@ -183,17 +183,19 @@ export function apply(ctx) {
       let strippedCount = 0
       for (const s of toStrip) for (const seq of s.seqs) if (stripResult(session, seq)) strippedCount++
       if (toEvict.length) {
-        if (evictBatch) {
-          // E2：合并相邻段为一次 replace，减少缓存打断次数
-          for (const { start, end, labels } of mergeRanges(toEvict)) {
-            evictRange(session, start, end, {
-              name: labels.join('+'),
-              type: toEvict[0].type,
-              readPaths: toEvict.flatMap((p) => p.readPaths ?? []),
-            })
-          }
-        } else {
-          for (const t of toEvict) evictRange(session, t.start, t.end, { name: t.label, type: t.type, readPaths: t.readPaths })
+        // 位置区间驱逐(根治)：surface 经 strip/marker replace 后 seq 不再与位置有序对应，
+        // 驱逐一律按段在 surface 中的位置块执行；位置靠后的段先驱逐(前面段位置保持有效)。
+        const withPos = toEvict.filter((t) => t.posStart != null && t.posEnd != null)
+        const units = evictBatch
+          ? mergeBlocksByPos(withPos.map((t) => ({ posStart: t.posStart, posEnd: t.posEnd, label: t.label, type: t.type, readPaths: t.readPaths ?? [] })))
+          : withPos.map((t) => ({ posStart: t.posStart, posEnd: t.posEnd, labels: [t.label], type: t.type, readPaths: t.readPaths ?? [] }))
+        units.sort((a, b) => b.posStart - a.posStart)
+        for (const u of units) {
+          const live = session.surface?.nodes ?? []
+          if (u.posEnd >= live.length) continue
+          const block = live.slice(u.posStart, u.posEnd + 1)
+          if (!block.length) continue
+          evictRange(session, block[0], block[block.length - 1], { name: u.labels.join('+'), type: u.type, readPaths: u.readPaths })
         }
       }
       console.log(`[dsh-cwl] ${session.id} 驱逐后 ${usageTokens(session)}/${budget} tokens（order=${evictOrder} batch=${evictBatch}，整段驱逐 ${toEvict.length}，内容裁剪 ${strippedCount}）`)

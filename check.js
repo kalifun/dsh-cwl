@@ -1,6 +1,6 @@
 // dsh-cwl 纯函数单元测试：node check.js
 import assert from 'node:assert/strict'
-import { deriveEpisodes, largeResultSeqs, mergeRanges, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData } from './lib.js'
+import { deriveEpisodes, episodeBlock, largeResultSeqs, mergeBlocksByPos, mergeRanges, pairingBreaks, pickEvictionTarget, shadowedNodes, stubToolResultData } from './lib.js'
 
 // --- deriveEpisodes：阶段合并 + 依赖推断 ---
 const events = [
@@ -199,5 +199,35 @@ assert.equal(breaks8[0].callId, 'c1', 'flagged pair id')
 const ev8c = [mkCall(9, 'c9'), mkRes(10, 'c9')]
 const breaks8b = pairingBreaks(ev8c, [9, 10], 10, 10)
 assert.equal(breaks8b.length, 1, 'result in window with call outside must be flagged')
+
+// --- 位置区间驱逐原语 ---
+// surface 顺序推段带 posStart/posEnd; episodeBlock 取连续位置块(含中间 stub)
+const ev9 = [
+  { type: 'user/message', seq: 0, data: { content: [{ type: 'text', text: 't' }] } },
+  { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'tool-call', name: 'read', arguments: '{"file_path":"/a"}' }] } } },
+  { type: 'tool/result', seq: 2, data: { message: { content: [{ type: 'tool-result', toolCallId: 'x', content: [{ type: 'text', text: 'BIG' }] }] } } },
+  { type: 'assistant/message', seq: 3, data: { message: { content: [{ type: 'tool-call', name: 'bash', arguments: '{"command":"echo z >> /b"}' }] } } },
+  { type: 'tool/result', seq: 4, data: { message: { content: [{ type: 'tool-result', toolCallId: 'y', content: [{ type: 'text', text: 'ok' }] }] } } },
+  { type: 'tool/result', seq: 5, surfaceOp: { op: 'replace', start: 2, end: 2 }, data: { message: { content: [{ type: 'tool-result', toolCallId: 'x', content: [{ type: 'text', text: '[stub]' }] }] } } },
+]
+const surface9 = [0, 1, 5, 3, 4] // stub 5 顶替 result 2
+const eps9 = deriveEpisodes(ev9, { surface: surface9 })
+const expl9 = eps9.find((e) => e.type === 'expl')
+const act9 = eps9.find((e) => e.type === 'act')
+assert.equal(expl9.posStart, 1, 'expl starts at surface index 1')
+assert.equal(expl9.posEnd, 2, 'expl ends at stub index 2 (surface order)')
+assert.equal(act9.posStart, 3, 'act starts at index 3')
+assert.equal(act9.posEnd, 4, 'act ends at index 4')
+assert.deepEqual(episodeBlock(surface9, expl9), [1, 5], 'expl block = call + stub (positional, contiguous)')
+assert.deepEqual(episodeBlock(surface9, act9), [3, 4], 'act block = call + result')
+// mergeBlocksByPos: 位置连续才合并;有间隙不合并
+const mb = mergeBlocksByPos([
+  { posStart: 1, posEnd: 2, label: 'expl-1' },
+  { posStart: 3, posEnd: 4, label: 'act-1' },
+  { posStart: 7, posEnd: 8, label: 'act-2' },
+])
+assert.equal(mb.length, 2, 'position-adjacent merged, gapped stays separate')
+assert.deepEqual(mb[0], { posStart: 1, posEnd: 4, labels: ['expl-1', 'act-1'] }, 'merged block 1-4')
+assert.deepEqual(mb[1], { posStart: 7, posEnd: 8, labels: ['act-2'] }, 'separate block 7-8')
 
 console.log('✓ dsh-cwl 纯函数检查通过：episode 合并 / 依赖推断 / 分级选择 / 遮蔽排除 / tail顺序 / tailWindow / mergeRanges / 用户消息关段 / 读写分类 / 批次上限 / resultSeqs / largeResultSeqs / stub同构 / exclude')

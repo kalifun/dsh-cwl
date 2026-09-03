@@ -77,11 +77,16 @@ export function deriveEpisodes(events, opts = {}) {
     if (cur) { cur.completed = true; episodes.push(cur); cur = null }
   }
   const bySeq = new Map(events.map((e) => [e.seq, e]))
-  const stream = opts.surface
+  // surface 模式：位置区间 = surface 数组下标(驱逐/合并的唯一可靠不变量；
+  // strip/marker replace 后 seq 不再与位置有序对应，seq 端点会错位)。
+  const hasPos = Array.isArray(opts.surface)
+  const stream = hasPos
     ? opts.surface.map((seq) => bySeq.get(seq)).filter(Boolean)
     : events
+  let pos = -1
 
   for (const ev of stream) {
+    if (hasPos) pos++
     const type = ev?.type
     const data = ev.data ?? {}
     if (type === 'user/message') {
@@ -108,6 +113,7 @@ export function deriveEpisodes(events, opts = {}) {
       if (cur && cur.type === (isExpl ? 'expl' : 'act') && inCap) {
         cur.batches.push({ seq: ev.seq, names, readPaths, touchedPaths })
         cur.endSeq = ev.seq
+        if (hasPos) cur.posEnd = pos
         cur.toolNames.push(...names)
         cur.readPaths.push(...readPaths)
         if (!isExpl) cur.touchedPaths.push(...touchedPaths)
@@ -115,19 +121,19 @@ export function deriveEpisodes(events, opts = {}) {
         flush()
         if (isExpl) {
           explCount += 1
-          cur = { name: `expl-${explCount}`, type: 'expl', startSeq: ev.seq, endSeq: ev.seq,
+          cur = { name: `expl-${explCount}`, type: 'expl', startSeq: ev.seq, endSeq: ev.seq, posStart: hasPos ? pos : undefined, posEnd: hasPos ? pos : undefined,
                   batches: [{ seq: ev.seq, names, readPaths, touchedPaths: [] }], toolNames: [...names],
                   readPaths: [...readPaths], deps: [], touchedPaths: [], resultSeqs: [], completed: false }
         } else {
           actCount += 1
-          cur = { name: `act-${actCount}`, type: 'act', startSeq: ev.seq, endSeq: ev.seq,
+          cur = { name: `act-${actCount}`, type: 'act', startSeq: ev.seq, endSeq: ev.seq, posStart: hasPos ? pos : undefined, posEnd: hasPos ? pos : undefined,
                   batches: [{ seq: ev.seq, names, readPaths, touchedPaths }], toolNames: [...names],
                   readPaths: [...readPaths], deps: [], touchedPaths: [...touchedPaths], resultSeqs: [], completed: false }
         }
       }
     } else if (type === 'tool/result') {
       // 记录段内所有 tool/result 节点 seq(供细粒度内容裁剪定位)
-      if (cur) { cur.endSeq = ev.seq; cur.resultSeqs.push(ev.seq) }
+      if (cur) { cur.endSeq = ev.seq; cur.resultSeqs.push(ev.seq); if (hasPos) cur.posEnd = pos }
     }
   }
   flush()
@@ -232,6 +238,35 @@ export function stubToolResultData(originalEvent, stubText) {
       content: [{ ...block, content: [{ type: 'text', text: stubText }] }],
     },
   }
+}
+
+/**
+ * 取段在 surface 中的完整位置块(连续节点,含中间替换进来的 stub)。
+ * 位置区间是驱逐的唯一可靠不变量——seq 端点经 strip/marker replace 后会错位。
+ */
+export function episodeBlock(surface, ep) {
+  if (!ep || ep.posStart == null || ep.posEnd == null) return []
+  if (ep.posStart < 0 || ep.posEnd >= surface.length || ep.posStart > ep.posEnd) return []
+  return surface.slice(ep.posStart, ep.posEnd + 1)
+}
+
+/**
+ * 驱逐目标按 surface 位置相邻合并(batch)：只合并位置连续(posEnd+1 === posStart)
+ * 的段——位置连续意味着之间无其他节点(用户消息不会被包进驱逐窗口)。
+ */
+export function mergeBlocksByPos(blocks) {
+  const sorted = [...blocks].sort((a, b) => a.posStart - b.posStart)
+  const merged = []
+  for (const b of sorted) {
+    const last = merged[merged.length - 1]
+    if (last && last.posEnd + 1 === b.posStart) {
+      last.posEnd = b.posEnd
+      last.labels.push(b.label)
+    } else {
+      merged.push({ posStart: b.posStart, posEnd: b.posEnd, labels: [b.label] })
+    }
+  }
+  return merged
 }
 
 /**

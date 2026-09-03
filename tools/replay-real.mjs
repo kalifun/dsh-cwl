@@ -22,7 +22,7 @@
 //     budget  压力阈值（tokens）
 //     sorted  用排序后的 newestAllowed（修复后算法；不传 = 旧算法对照）
 import { readFileSync } from 'node:fs'
-import { deriveEpisodes, largeResultSeqs, mergeRanges, pickEvictionTarget, shadowedNodes, stubToolResultData } from '../lib.js'
+import { deriveEpisodes, episodeBlock, largeResultSeqs, mergeBlocksByPos, mergeRanges, pickEvictionTarget, shadowedNodes, stubToolResultData } from '../lib.js'
 
 // 轻量 fold：与 surface.ts 的 applySurfacePlan 语义等价（append 推尾 / replace 原位替换）
 const SURFACE_TYPES = new Set(['user/message', 'assistant/message', 'tool/result'])
@@ -227,7 +227,7 @@ for (const ev of events) {
         continue
       }
     }
-    toEvict.push(t)
+    toEvict.push({ ...t, posStart: ep?.posStart, posEnd: ep?.posEnd })
   }
   // 执行：先 strip 后 evict(镜像引擎)
   // 工具配对断言：每个 in-surface tool/result 的 toolCallId 必须存在对应的
@@ -283,17 +283,23 @@ for (const ev of events) {
       stripped.add(seq)
     }
   }
-  const evictRanges = BATCH
-    ? mergeRanges(toEvict.map((p) => ({ start: p.start, end: p.end, label: p.label }))).map((r) => ({ start: r.start, end: r.end, labels: r.labels }))
-    : toEvict.map((t) => ({ start: t.start, end: t.end, labels: [t.label] }))
-  for (const r of evictRanges) {
+  // 位置块驱逐(镜像新引擎: 位置区间端点 + posStart 降序; 不再用 seq 端点)
+  const withPos = toEvict.filter((t) => t.posStart != null && t.posEnd != null)
+  const units = BATCH
+    ? mergeBlocksByPos(withPos.map((t) => ({ posStart: t.posStart, posEnd: t.posEnd, label: t.label, type: t.type })))
+    : withPos.map((t) => ({ posStart: t.posStart, posEnd: t.posEnd, labels: [t.label], type: t.type }))
+  units.sort((a, b) => b.posStart - a.posStart)
+  for (const u of units) {
     if (actLog.applyFail > 0) break // 引擎失败即中止本 pre-step 后续动作
-    const shadowed = shadowedNodes([...foldSurface(work).nodes], r.start, r.end)
-    const evt = { type: 'user/message', seq: work.length, time: Date.now(), data: { role: 'user', content: [{ type: 'text', text: `[cwl-evicted:${r.labels.join('+')}]` }] }, surfaceOp: { op: 'replace', start: r.start, end: r.end }, sourceEventSeqs: shadowed.length ? shadowed : [r.start] }
+    const live = [...foldSurface(work).nodes]
+    if (u.posEnd >= live.length) continue
+    const block = live.slice(u.posStart, u.posEnd + 1)
+    if (!block.length) continue
+    const evt = { type: 'user/message', seq: work.length, time: Date.now(), data: { role: 'user', content: [{ type: 'text', text: `[cwl-evicted:${u.labels.join('+')}]` }] }, surfaceOp: { op: 'replace', start: block[0], end: block[block.length - 1] }, sourceEventSeqs: block }
     applyOne(evt, 'evict')
   }
   picksTotal += toEvict.length
-  actionsTotal += evictRanges.length
+  actionsTotal += units.length
   var applyStats = { strip: actLog.strip, evict: actLog.evict, err: applyErr, detail: applyErrDetail }
   continue
 }
