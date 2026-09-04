@@ -33,10 +33,19 @@ export function apply(ctx) {
   const evictionLog = new Map() // sid → [{episode, start, end, readPaths, at}]
 
   /** 计算会话当前真实压力（input + cacheRead + output + reasoning）。 */
+  /** 会话当前上下文压力(tokens)。
+   * 口径(适配宿主 token-meter 语义):
+   *  - rc.1+: measure().surfaceTokens = 当前 surface 总 tokens(下请求要发的上下文)，
+   *    驱逐后下降(循环预算判断有效)。这是 CWL 的正确压力——预算即上下文保护线。
+   *    (勿用 pressureTokens: 它是"最新单请求 prompt 侧"采样,alpha.3 无此字段,
+   *    rc.1 有但非累计/非占用——误用它导致 rc.1 上永不超预算 → CWL 静默失效)
+   *  - 旧宿主(alpha.3,无 surfaceTokens): 回退按 usage 事件累计求和
+   *    (历史 workaround: 旧 token-meter 不含 cacheRead;累计口径会高估,已随 rc.1 弃用)
+   */
   function usageTokens(session) {
     try {
       const m = tokenMeter?.measure(session)
-      if (m?.pressureTokens != null) return m.pressureTokens
+      if (m?.surfaceTokens != null) return m.surfaceTokens
       let input = 0, cache = 0, output = 0, reason = 0
       for (const ev of session.events) {
         if (ev?.type !== 'assistant/message') continue
