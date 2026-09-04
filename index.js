@@ -33,6 +33,12 @@ export function apply(ctx) {
   const evictionLog = new Map() // sid → [{episode, start, end, readPaths, at}]
 
   /** 计算会话当前真实压力（input + cacheRead + output + reasoning）。 */
+/** 会话事件访问: rc.1 起 sessionEventsOf(session) 移除,改用 snapshotEvents();兼容旧宿主(alpha.3)。 */
+function sessionEventsOf(session) {
+  if (!session) return []
+  if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+  return session.events ?? []
+}
   /** 会话当前上下文压力(tokens)。
    * 口径(适配宿主 token-meter 语义):
    *  - rc.1+: measure().surfaceTokens = 当前 surface 总 tokens(下请求要发的上下文)，
@@ -47,7 +53,7 @@ export function apply(ctx) {
       const m = tokenMeter?.measure(session)
       if (m?.surfaceTokens != null) return m.surfaceTokens
       let input = 0, cache = 0, output = 0, reason = 0
-      for (const ev of session.events) {
+      for (const ev of sessionEventsOf(session)) {
         if (ev?.type !== 'assistant/message') continue
         const u = ev.data?.usage
         if (!u) continue
@@ -82,7 +88,7 @@ export function apply(ctx) {
     const shadowed = shadowedNodes(nodes, start, end)
     // 配对完整性防御：窗口若切开 tool-call/result 对(驱逐后产生孤儿消息 → LLM 400)，
     // 跳过本次驱逐(结构性安全；fold 校验发现不了这种失败)。
-    const breaks = pairingBreaks(session.events, nodes, start, end)
+    const breaks = pairingBreaks(sessionEventsOf(session), nodes, start, end)
     if (breaks.length > 0) {
       const list = evictionLog.get(session.id) ?? []
       list.push({ episode: episode.name, kind: 'skipped-pairing', start, end, broke: breaks[0].callId, at: Date.now() })
@@ -123,7 +129,7 @@ export function apply(ctx) {
   /** 裁剪一个 tool/result 节点的内容（surface 内容改写，保持工具配对与结构）。 */
   function stripResult(session, resultSeq) {
     const sid = session.id
-    const ev = session.events.find((e) => e.seq === resultSeq && e.type === 'tool/result')
+    const ev = sessionEventsOf(session).find((e) => e.seq === resultSeq && e.type === 'tool/result')
     if (!ev) return false
     const text = toolResultText(ev)
     const stubText = `[cwl-stub: 工具结果 ${text.length} 字符已裁剪，需要时可用原工具重跑]`
@@ -148,7 +154,7 @@ export function apply(ctx) {
     const toEvict = []
     const toStrip = []
     const excluded = new Set() // 本步已裁剪的 expl，不整段驱逐
-    const episodes = deriveEpisodes(session.events, { surface })
+    const episodes = deriveEpisodes(sessionEventsOf(session), { surface })
     const byStart = new Map(episodes.map((e) => [e.startSeq, e]))
     const sid = session.id
     const stripped = strippedSeqs.get(sid) ?? new Set()
@@ -157,11 +163,11 @@ export function apply(ctx) {
       if (usageTokens(session) <= budgetTokens(session)) break
       const occupied = [...toEvict, ...toStrip]
       const liveSurface = surface.filter((s) => !occupied.some((p) => s >= p.start && s <= p.end))
-      const target = pickEvictionTarget(session.events, liveSurface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow, exclude: excluded })
+      const target = pickEvictionTarget(sessionEventsOf(session), liveSurface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow, exclude: excluded })
       if (!target) break
       const ep = byStart.get(target.start)
       if (ep?.type === 'expl' && stripBig) {
-        const big = largeResultSeqs(session.events, ep, liveSurface, stripThreshold)
+        const big = largeResultSeqs(sessionEventsOf(session), ep, liveSurface, stripThreshold)
         const todo = big.filter((x) => !stripped.has(x.seq))
         if (todo.length) {
           toStrip.push({ start: target.start, end: target.end, seqs: todo.map((x) => x.seq) })
@@ -186,7 +192,7 @@ export function apply(ctx) {
       const surface = session.surface?.nodes ?? []
       // 自适应最新边界(3.3)：保护正在进行的工具调用链(最后一个未完成段)，
       // 而非固定 2 节点；其之前的位置为可驱逐边界
-      const epsNow = deriveEpisodes(session.events, { surface })
+      const epsNow = deriveEpisodes(sessionEventsOf(session), { surface })
       const newestAllowed = newestEvictableBoundary(surface, epsNow)
       const { toEvict, toStrip } = collectTargets(session, surface, newestAllowed)
       let strippedCount = 0
@@ -260,9 +266,9 @@ export function apply(ctx) {
               return res.end(JSON.stringify({ error: 'session not live' }))
             }
             const surface = session.surface?.nodes ?? []
-            const episodes = deriveEpisodes(session.events, { surface })
+            const episodes = deriveEpisodes(sessionEventsOf(session), { surface })
             const newestAllowed = newestEvictableBoundary(surface, episodes)
-            const target = pickEvictionTarget(session.events, surface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow })
+            const target = pickEvictionTarget(sessionEventsOf(session), surface, newestAllowed, { order: evictOrder, tailWindow: evictTailWindow })
             if (!target) {
               res.writeHead(200, { 'content-type': 'application/json' })
               return res.end(JSON.stringify({ ok: true, evicted: 0, note: 'no evictable episode' }))
